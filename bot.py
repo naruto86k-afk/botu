@@ -2110,10 +2110,10 @@ async def run_user_bot(session_string, chat_id):
             "💕","💟","❣️","❤️‍🔥","❤️‍🩹"
         ]
         user_bot.ADD_BOTS_LIST = [
-            "@Soulreaper99_bot", "@Soulreaper98_bot", "@Soulreaper97_bot",
-            "@Soulreaper96_bot", "@Soulreaper95_bot", "@Soulreaper94_bot",
-            "@Soulreaper93_bot", "@Soulreapernc1_bot", "@Soulreapernc2_bot",
-            "@Soulreapernc3_bot", "@Asurfighter12bot",
+            "@Soul5670bot", "@Soul567bot", "@Soul687bot",
+            "@Soulr_67bot", "@Soul57bot", "@Soul588bot",
+            "@Soul887_bot", "@soul768bot", "@soul767bot",
+            "@Soul569bot", "@Asurfighter12bot",
         ]
         user_bot.START_TIME = time.time()
         user_bot.react_targets = {}

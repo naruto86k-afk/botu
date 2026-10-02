@@ -2231,7 +2231,7 @@ async def run_user_bot(session_string, chat_id):
             "text": None,
             "chat_id": None,
         }
-                # ─── NC PATTERNS ────────────────────────────────────────────────────
+          # ─── NC PATTERNS ────────────────────────────────────────────────────
         HINDINC_PATTERNS = [
             "{text} चुडाकड़ ⊹ ࣪ ﹏𓊝﹏𓂁﹏⊹ ࣪ ˖",
             "{text} रैंडी ˖ ࣪ ꉂ🗯˙🫐⃟.꩜‹—",

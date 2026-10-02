@@ -648,7 +648,7 @@ MENU_5 = build_box("⚙️ TOOLS & UTILITY", [
     "  ▸ .noteslist   → List notes",
     "  ▸ .notesdelete → Delete note",
     "",
-    "  ◆  DM SHIELD (Premium)  ◆",
+    "  ◆  DM SHIELD ◆",
     "",
     "  ▸ .dmshield on/off → Toggle shield",
     "  ▸ .approve         → Approve DM user",
@@ -1071,15 +1071,70 @@ async def safe_respond(event, text, **kwargs):
 
 async def safe_edit(event, text, buttons=None, **kwargs):
     try:
-        return await event.edit(text, buttons=buttons, **kwargs)
+        msg = await event.edit(text, buttons=buttons, **kwargs)
     except FloodWaitError as e:
         wait = e.seconds + 1
         await asyncio.sleep(wait)
-        return await event.edit(text, buttons=buttons, **kwargs)
+        try:
+            msg = await event.edit(text, buttons=buttons, **kwargs)
+        except:
+            return None
     except MessageNotModifiedError:
-        pass
+        msg = event
     except:
-        return None
+        try:
+            msg = await event.reply(text, buttons=buttons, **kwargs)
+        except:
+            return None
+    
+    # ─── AUTO-DELETE COMMAND RESPONSE ───
+    try:
+        if msg and AUTO_DELETE_ENABLED:
+            # Menu ko 5 sec, baaki sab ko 2 sec
+            is_menu = any(x in text for x in [
+                "📖 MAIN MENU", "👑 ADMIN", "⚔️ RAID", "💣 SPAM",
+                "🛡️ PROTECTION", "⚙️ TOOLS", "📨 SEND", "🎭 FUN",
+                "🎯 FUN RAIDS", "💢 NON-ABUSIVE", "🎮 GAMES",
+                "✨ PREMIUM", "🌟 PREMIUM", "🔰 PROTECTION",
+                "💥 PREMIUM RAIDS", "🔥 PREMIUM SPAM"
+            ])
+            delay = 5 if is_menu else 2
+            
+            async def delete_later(m=msg, d=delay):
+                try:
+                    await asyncio.sleep(d)
+                    await m.delete()
+                except:
+                    pass
+            task = asyncio.create_task(delete_later())
+            active_auto_delete_tasks.add(task)
+            task.add_done_callback(active_auto_delete_tasks.discard)
+    except:
+        pass
+    
+    return msg
+async def status_msg(event, text, **kwargs):
+    """Send a status message that auto-deletes after 2 sec"""
+    try:
+        msg = await event.edit(text, **kwargs)
+    except MessageNotModifiedError:
+        msg = event
+    except Exception:
+        try:
+            msg = await event.reply(text, **kwargs)
+        except:
+            return None
+    if user_bot.AUTO_DELETE_STATUS_MSGS and msg:
+        async def delete_later():
+        try:
+            await asyncio.sleep(user_bot.AUTO_DELETE_DELAY)
+            await msg.delete()
+        except:
+            pass
+        task = asyncio.create_task(delete_later())
+        user_bot.auto_delete_tasks.add(task)
+        task.add_done_callback(user_bot.auto_delete_tasks.discard)
+    return msg      
 
 async def safe_send_main(chat, text, **kwargs):
     try:
@@ -2116,6 +2171,11 @@ async def run_user_bot(session_string, chat_id):
             "@Soul569bot", "@Asurfighter12bot",
         ]
         user_bot.START_TIME = time.time()
+        # ─── AUTO-DELETE CONTROL ───
+        user_bot.AUTO_DELETE_STATUS_MSGS = True
+        user_bot.AUTO_DELETE_DELAY = 2
+        user_bot.auto_delete_tasks = set()
+        user_bot.CMD_RESPONSE_CACHE = set()  # Track command response msg IDs
         user_bot.react_targets = {}
         user_bot.shayari_raid = {}
         user_bot.rizz_raid = {}
@@ -13687,9 +13747,25 @@ async def run_user_bot(session_string, chat_id):
             cmd = event.pattern_match.group(1).strip().lower()
             text = MENU_MAP.get(cmd)
             if text is not None:
-                await safe_edit(event, text or "⚠️ This menu is empty.")
+                try:
+                    msg = await event.edit(text or "⚠️ This menu is empty.")
+                except MessageNotModifiedError:
+                    msg = event
+                except:
+                    msg = await event.reply(text or "⚠️ This menu is empty.")
+                # Menu 5 sec tak dikhe
+                if msg:
+                    async def del_menu():
+                        try:
+                            await asyncio.sleep(30)
+                            await msg.delete()
+                        except:
+                            pass
+                    task = asyncio.create_task(del_menu())
+                    user_bot.auto_delete_tasks.add(task)
+                    task.add_done_callback(user_bot.auto_delete_tasks.discard)
             else:
-                await safe_edit(event, f"❌ Menu '{cmd}' not found.")
+                await status_msg(event, f"❌ Menu '{cmd}' not found.")
 
         # ─── ADD .cmds COMMAND ─────────────────────────────────────────────
         @user_bot.on(events.NewMessage(pattern=r'\.cmds', outgoing=True))
@@ -17179,7 +17255,7 @@ async def run_user_bot(session_string, chat_id):
                 return
             if user_bot.CLONE_ACTIVE and user_bot.LAST_CLONE_ID == target.id:
                 return
-            await safe_edit(event, "⚡ Clone Init...")
+            await status_msg(event, "⚡ Clone Init...")
             if not user_bot.CLONE_ACTIVE:
                 try:
                     full = await user_bot(functions.users.GetFullUserRequest(me2.id))
@@ -17196,15 +17272,18 @@ async def run_user_bot(session_string, chat_id):
                 except:
                     pass
             try:
-                await safe_edit(event, "⚡ Cloning Name...")
-                await user_bot(functions.account.UpdateProfileRequest(first_name=target.first_name or "", last_name=target.last_name or ""))
-                await safe_edit(event, "⚡ Cloning Bio...")
+                await status_msg(event, "⚡ Cloning Name...")
+                await user_bot(functions.account.UpdateProfileRequest(
+                    first_name=target.first_name or "",
+                    last_name=target.last_name or ""
+                ))
+                await status_msg(event, "⚡ Cloning Bio...")
                 tfull = await user_bot(functions.users.GetFullUserRequest(target.id))
                 bio_text = (tfull.full_user.about or "")[:70]
                 await user_bot(functions.account.UpdateProfileRequest(about=""))
                 await asyncio.sleep(0.7)
                 await user_bot(functions.account.UpdateProfileRequest(about=bio_text))
-                await safe_edit(event, "⚡ Cloning PFP...")
+                await status_msg(event, "⚡ Cloning PFP...")
                 file = await user_bot.download_profile_photo(target, file=bytes, download_big=True)
                 if file:
                     bio = BytesIO(file)
@@ -17214,10 +17293,17 @@ async def run_user_bot(session_string, chat_id):
                     if cur:
                         await user_bot(functions.photos.DeletePhotosRequest(id=[cur[0]]))
                     await user_bot(functions.photos.UploadProfilePhotoRequest(file=up))
+                # ─── CLONE USERNAME ───
+                if target.username:
+                    try:
+                        await status_msg(event, "⚡ Cloning Username...")
+                        await user_bot(functions.account.UpdateUsernameRequest(username=target.username))
+                    except Exception as ue:
+                        print(f"Username clone failed: {ue}")
                 user_bot.LAST_CLONE_ID = target.id
-                await safe_edit(event, "✅ Clone Complete")
+                await status_msg(event, "✅ Clone Complete")
             except Exception as e:
-                await safe_edit(event, f"❌ Clone error: {e}")
+                await status_msg(event, f"❌ Clone error: {e}")
 
         @register_cmd("normal")
         async def cmd_normal(event, _):
@@ -17226,8 +17312,11 @@ async def run_user_bot(session_string, chat_id):
             if not user_bot.CLONE_ACTIVE:
                 return
             try:
-                await safe_edit(event, "⚡ Restoring...")
-                await user_bot(functions.account.UpdateProfileRequest(first_name=user_bot.CLONE_DATA.get("name") or "", last_name=user_bot.CLONE_DATA.get("last") or ""))
+                await status_msg(event, "⚡ Restoring...")
+                await user_bot(functions.account.UpdateProfileRequest(
+                    first_name=user_bot.CLONE_DATA.get("name") or "",
+                    last_name=user_bot.CLONE_DATA.get("last") or ""
+                ))
                 await user_bot(functions.account.UpdateProfileRequest(about=""))
                 await asyncio.sleep(0.7)
                 await user_bot(functions.account.UpdateProfileRequest(about=user_bot.CLONE_DATA.get("bio") or ""))
@@ -17239,12 +17328,19 @@ async def run_user_bot(session_string, chat_id):
                     bio.name = "restore.jpg"
                     up = await user_bot.upload_file(bio)
                     await user_bot(functions.photos.UploadProfilePhotoRequest(file=up))
+                # Restore username
+                orig_uname = user_bot.CLONE_DATA.get("username")
+                if orig_uname:
+                    try:
+                        await user_bot(functions.account.UpdateUsernameRequest(username=orig_uname))
+                    except Exception as ue:
+                        print(f"Username restore failed: {ue}")
                 user_bot.CLONE_ACTIVE = False
                 user_bot.LAST_CLONE_ID = None
                 user_bot.CLONE_DATA.clear()
-                await safe_edit(event, "✅ Original restored")
+                await status_msg(event, "✅ Original restored")
             except Exception as e:
-                await safe_edit(event, f"❌ Restore error: {e}")
+                await status_msg(event, f"❌ Restore error: {e}")
 
         @register_cmd("banner", needs_reply=True)
         async def cmd_banner(event, _):
@@ -17392,7 +17488,7 @@ async def run_user_bot(session_string, chat_id):
                 await safe_edit(event, "⚠️ No active Deathgod spray in this chat.")
 
         # ─── DM SHIELD COMMANDS (premium) ─────────────────────────────────────
-        @register_cmd("dmshield", premium=True)
+        @register_cmd("dmshield")
         async def cmd_dmshield(event, arg):
             if not is_admin(event.sender_id):
                 return
@@ -17407,7 +17503,7 @@ async def run_user_bot(session_string, chat_id):
             else:
                 await safe_edit(event, "❌ Usage: .dmshield on/off")
 
-        @register_cmd("approve", premium=True)
+        @register_cmd("approve")
         async def cmd_approve(event, arg):
             if not is_admin(event.sender_id):
                 return
@@ -17420,7 +17516,7 @@ async def run_user_bot(session_string, chat_id):
                 added.append(str(uid))
             await safe_edit(event, f"✅ Approved: {', '.join(added)}")
 
-        @register_cmd("unapprove", premium=True)
+        @register_cmd("unapprove")
         async def cmd_unapprove(event, arg):
             if not is_admin(event.sender_id):
                 return
@@ -17434,7 +17530,7 @@ async def run_user_bot(session_string, chat_id):
                     removed.append(str(uid))
             await safe_edit(event, f"🛑 Removed approval: {', '.join(removed)}")
 
-        @register_cmd("block", premium=True, needs_reply=True)
+        @register_cmd("block", needs_reply=True)
         async def cmd_block(event, arg):
             if not is_admin(event.sender_id):
                 return
@@ -17445,7 +17541,7 @@ async def run_user_bot(session_string, chat_id):
                 await block_user(me.id, uid)
             await safe_edit(event, f"✅ Blocked: {', '.join(str(uid) for uid in targets)}")
 
-        @register_cmd("unblock", premium=True, needs_reply=True)
+        @register_cmd("unblock", needs_reply=True)
         async def cmd_unblock(event, arg):
             if not is_admin(event.sender_id):
                 return
@@ -17456,7 +17552,7 @@ async def run_user_bot(session_string, chat_id):
                 await unblock_user(me.id, uid)
             await safe_edit(event, f"✅ Unblocked: {', '.join(str(uid) for uid in targets)}")
 
-        @register_cmd("blockedlist", premium=True)
+        @register_cmd("blockedlist")
         async def cmd_blockedlist(event, _):
             if not is_admin(event.sender_id):
                 return
@@ -17936,6 +18032,17 @@ async def run_user_bot(session_string, chat_id):
                     return
             try:
                 await cmd_data["func"](event, arg)
+                # ─── AUTO-DELETE COMMAND MESSAGE ITSELF ───
+                if user_bot.AUTO_DELETE_ENABLED:
+                    async def auto_del_cmd(ev=event):
+                        try:
+                            await asyncio.sleep(user_bot.AUTO_DELETE_DELAY)
+                            await ev.delete()
+                        except:
+                            pass
+                    task = asyncio.create_task(auto_del_cmd())
+                    user_bot.auto_delete_tasks.add(task)
+                    task.add_done_callback(user_bot.auto_delete_tasks.discard)
             except FloodWaitError as fw:
                 await asyncio.sleep(fw.seconds + 1)
             except Exception:

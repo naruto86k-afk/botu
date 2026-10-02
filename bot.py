@@ -47,7 +47,7 @@ REQUIRED_CHANNELS = [
     #{"id": -1004334756214, "invite": "https://t.me/+5DvNxDnfAApjYWNk", "name": "Channel 2"},
     #{"id": -1004452969098, "invite": "https://t.me/+A1qEdXj8ZUI5ZGM1", "name": "Channel 3"},
     #{"id": -1004331434090, "invite": "https://t.me/+Wkmu7JUvlrBkZTI1", "name": "Channel 4"},
-    #{"id": -1004331557651, "invite": "https://t.me/+nOmFPUNhI6Q3MGQ1", "name": "Channel 5"},
+    {"id": -1004331557651, "invite": "https://t.me/+mOrR-r1m2iEzNDM1", "name": "Channel 5"},
 ]
 
 USERS_FILE = "broadcast_users.json"

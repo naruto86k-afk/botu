@@ -1124,17 +1124,19 @@ async def status_msg(event, text, **kwargs):
             msg = await event.reply(text, **kwargs)
         except:
             return None
+
     if user_bot.AUTO_DELETE_STATUS_MSGS and msg:
         async def delete_later():
-        try:
-            await asyncio.sleep(user_bot.AUTO_DELETE_DELAY)
-            await msg.delete()
-        except:
-            pass
+            try:
+                await asyncio.sleep(user_bot.AUTO_DELETE_DELAY)
+                await msg.delete()
+            except:
+                pass
+
         task = asyncio.create_task(delete_later())
         user_bot.auto_delete_tasks.add(task)
         task.add_done_callback(user_bot.auto_delete_tasks.discard)
-    return msg      
+    return msg
 
 async def safe_send_main(chat, text, **kwargs):
     try:

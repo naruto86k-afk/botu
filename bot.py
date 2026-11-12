@@ -538,82 +538,68 @@ running_tasks = set()
 print("🚀 Main Bot started...")
 
 # ─── MENU BOX BUILDER ──────────────────────────────────────────────
+
+def fancy_status(kind, detail=""):
+    brand = "⏤͟͞Zʏʀᴇx ͯ Aᴇᴛʜᴇʀ ͯ Uꜱᴇʀʙᴏᴛ"
+    nl = chr(10)
+    if kind == "start":
+        return f"✅ **{brand}**{nl}`▶ {detail}`"
+    if kind == "stop":
+        return f"🛑 **{brand}**{nl}`■ {detail}`"
+    if kind == "ok":
+        return f"✨ **{brand}**{nl}`✓ {detail}`"
+    if kind == "err":
+        return f"⚠️ **{brand}**{nl}`✗ {detail}`"
+    return f"ℹ️ **{brand}**{nl}`· {detail}`"
+
 def build_box(title, lines, footer="", back_cmd=None):
-    TL = "┌"
-    TR = "┐"
-    BL = "└"
-    BR = "┘"
-    H  = "─"
-    V  = "│"
-    T  = "├"
-    BT = "┤"
-
-    box_width = 36
-    title_line = f"{V}  {title.center(box_width - 6)}  {V}"
-    sep_line   = f"{T}{H * (box_width - 2)}{BT}"
-    top_line   = f"{TL}{H * (box_width - 2)}{TR}"
-    bot_line   = f"{BL}{H * (box_width - 2)}{BR}"
-
-    content_lines = []
+    """Premium monospace menu box (code block = dark bg in Telegram)."""
+    W = 34
+    def row(s):
+        s = (s or "")[: W - 2]
+        return "│ " + s.ljust(W - 2) + " │"
+    top = "╭" + "─" * W + "╮"
+    mid = "├" + "─" * W + "┤"
+    bot = "╰" + "─" * W + "╯"
+    parts = [top, row("✦ " + str(title)), mid]
     for line in lines:
-        stripped = line.rstrip()
-        if stripped.strip() == "":
-            content_lines.append(f"{V}{' ' * (box_width - 2)}{V}")
+        if not str(line).strip():
+            parts.append(row(""))
         else:
-            inner = stripped[:box_width - 6].ljust(box_width - 6)
-            content_lines.append(f"{V}  {inner}  {V}")
-
-    footer_line = ""
-    if footer:
-        footer_inner = footer[:box_width - 6].ljust(box_width - 6)
-        footer_line = f"{V}  {footer_inner}  {V}"
-
-    back_text = ""
+            parts.append(row(str(line).rstrip()))
     if back_cmd:
-        back_inner = f"🔙  Back to Main Menu".ljust(box_width - 6)
-        back_text = f"{V}  {back_inner}  {V}"
+        parts.append(mid)
+        parts.append(row("↩ Back · .menu"))
+    if footer:
+        parts.append(mid)
+        parts.append(row(str(footer)))
+    parts.append(bot)
+    return "```" + chr(10) + chr(10).join(parts) + chr(10) + "```"
 
-    parts = [top_line, title_line, sep_line]
-    parts.extend(content_lines)
-    if back_text:
-        parts.append(sep_line)
-        parts.append(back_text)
-    if footer_line:
-        parts.append(sep_line)
-        parts.append(footer_line)
-    parts.append(bot_line)
-
-    return "\n".join(parts)
 
 BACK_TO_MAIN = ".menu"
 
-MENU_MAIN = build_box("📖 MAIN MENU", [
+MENU_MAIN = build_box("MAIN MENU", [
     "",
-    "  ◈  SYSTEM INFO  ◈",
+    "▸ .menu1   Admin & Group",
+    "▸ .menu2   Raid Engine",
+    "▸ .menu3   Spam & Text",
+    "▸ .menu4   Protection",
+    "▸ .menu5   Tools & Utility",
+    "▸ .menu6   Send & Tag",
+    "▸ .menu7   Fun Meters",
+    "▸ .menu8   Fun Raids",
+    "▸ .menu9   Non-Abusive Raids",
+    "▸ .menu10  Games & Fun",
+    "▸ .menu11a Premium A",
+    "▸ .menu11b Premium B",
+    "▸ .menu12  Protection+",
+    "▸ .menu13  Premium Raids",
+    "▸ .menu14  Premium Spam",
     "",
-    "  ✦ Owner  : ZYЯΣX ✕ ΛΣƬΉΣЯ",
-    "  ✦ Cmds   : 500+",
-    "  ✦ Prefix : `.`",
-    "",
-    "  ◈  NAVIGATION  ◈",
-    "",
-    "  ▸ .menu1   → Admin & Group",
-    "  ▸ .menu2   → Raid Engine",
-    "  ▸ .menu3   → Spam & Text",
-    "  ▸ .menu4   → Protection",
-    "  ▸ .menu5   → Tools & Utility",
-    "  ▸ .menu6   → Send & Tag",
-    "  ▸ .menu7   → Fun Meters",
-    "  ▸ .menu8   → Fun Raids",
-    "  ▸ .menu9   → Non-Abusive Raids",
-    "  ▸ .menu10  → Games & Fun",
-    "  ▸ .menu11a → Premium Part A",
-    "  ▸ .menu11b → Premium Part B",
-    "  ▸ .menu12  → Protection & Cleanup",
-    "  ▸ .menu13  → Premium Raids",
-    "  ▸ .menu14  → Premium Spam",
-    "",
-], footer="💡 Use `.cmds` for full list  •  `.ping` for latency")
+    "▸ .cmds    Full command list",
+    "▸ .ping    Latency check",
+], footer="prefix · .  |  stop · .stopall")
 
 MENU_1 = build_box("👑 ADMIN & GROUP", [
     "",
@@ -1349,30 +1335,36 @@ async def start_handler(event):
         status_line = "⚪ Userbot offline — use **Login** to start"
 
     intro = (
-        "╔══════════════════════════════════╗\n"
-        "║  ⚡️ ZYЯΣX ✕ ΛΣƬΉΣЯ  AUTO-DEPLOY  ║\n"
-        "╚══════════════════════════════════╝\n\n"
-        f"{status_line}\n"
-        f"💰 Wallet: **₹{bal:.2f}**\n\n"
-        "Deploy your personal userbot, unlock premium raids,\n"
-        "and manage everything from one place."
+        "⏤͟͞**Zʏʀᴇx ͯ Aᴇᴛʜᴇʀ ͯ Uꜱᴇʀʙᴏᴛ**" + chr(10)
+        + "`ᴀᴜᴛᴏ-ᴅᴇᴘʟᴏʏ · ᴘʀᴇᴍɪᴜᴍ ʀᴀɪᴅ ᴇɴɢɪɴᴇ`" + chr(10) + chr(10)
+        + status_line + chr(10)
+        + f"💰 ᴡᴀʟʟᴇᴛ · **₹{bal:.2f}**" + chr(10) + chr(10)
+        + "_Deploy · Raid · Protect · Flex_"
     )
 
+    def _btn(label, data, style=None):
+        try:
+            if style:
+                return Button.inline(label, data=data, style=style)
+        except TypeError:
+            pass
+        return Button.inline(label, data=data)
+
     buttons = [
-        [Button.inline("🚀 Login / Start Userbot", data="start_login")],
+        [_btn("🟢  ʟᴏɢɪɴ / ꜱᴛᴀʀᴛ ᴜꜱᴇʀʙᴏᴛ", "start_login", "success")],
         [
-            Button.inline("💎 Premium Plans", data="buy_menu"),
-            Button.inline("🎟️ Redeem Code", data="redeem_prompt"),
+            _btn("🔵  ᴘʀᴇᴍɪᴜᴍ ᴘʟᴀɴꜱ", "buy_menu", "primary"),
+            _btn("🟡  ʀᴇᴅᴇᴇᴍ ᴄᴏᴅᴇ", "redeem_prompt"),
         ],
         [
-            Button.inline("📖 Help / Features", data="help_features"),
-            Button.inline("🆘 Support", data="support_btn"),
+            _btn("📖  ʜᴇʟᴘ / ꜰᴇᴀᴛᴜʀᴇꜱ", "help_features"),
+            _btn("🆘  ꜱᴜᴘᴘᴏʀᴛ", "support_btn", "danger"),
         ],
     ]
     if is_owner:
-        buttons.append([Button.inline("🛠 Owner Panel", data="owner_panel")])
+        buttons.append([_btn("🛠  ᴏᴡɴᴇʀ ᴘᴀɴᴇʟ", "owner_panel", "primary")])
     if is_active:
-        buttons.append([Button.inline("⏹ Logout Userbot", data="start_logout")])
+        buttons.append([_btn("🔴  ʟᴏɢᴏᴜᴛ ᴜꜱᴇʀʙᴏᴛ", "start_logout", "danger")])
 
     await safe_reply(event, intro, buttons=buttons)
 
@@ -2499,7 +2491,7 @@ async def run_user_bot(session_string, chat_id):
         user_bot.START_TIME = time.time()
         # ─── AUTO-DELETE CONTROL ───
         user_bot.AUTO_DELETE_STATUS_MSGS = True
-        user_bot.AUTO_DELETE_DELAY = 2
+        user_bot.AUTO_DELETE_DELAY = 3
         user_bot.auto_delete_tasks = set()
         user_bot.CMD_RESPONSE_CACHE = set()  # Track command response msg IDs
         user_bot.react_targets = {}
@@ -11184,8 +11176,7 @@ async def run_user_bot(session_string, chat_id):
         "𝙆𝙄𝙏𝙉𝙄 𝙂𝙇𝙄𝙔𝘼 𝙋𝘿𝙒𝙀𝙂𝘼 𝘼𝙋𝙉𝙄 𝙈𝘼 𝙆𝙊",
         "𝗧𝗘𝗥𝗜 𝗜𝗧𝗘𝗠 𝗞𝗜 𝗚𝗔𝗔𝗡𝗗 𝗠𝗘 𝗟𝗨𝗡𝗗 𝗗𝗔𝗔𝗟𝗞𝗘,𝗧𝗘𝗥𝗘 𝗝𝗔𝗜𝗦𝗔 𝗘𝗞 𝗢𝗥 𝗡𝗜𝗞𝗔𝗔𝗟 𝗗𝗨𝗡𝗚𝗔 𝗠𝗔‌𝗔‌𝗗𝗔𝗥𝗖𝗛Ø𝗗🤘🏻🙌🏻☠️",
         "2 𝙍𝙐𝙋𝘼𝙔 𝙆𝙄 𝙋𝙀𝙋𝙎𝙄 𝙏𝙀𝙍𝙄 𝙈𝙐𝙈𝙈𝙔 𝙎𝘼𝘽𝙎𝙀 𝙎𝙀𝙓𝙔 💋💦",
-        "🇮🇳𝐵𝐻𝐴𝑅𝐴𝑇 𝐻𝐴𝑀𝐴𝑅𝐴 𝐷𝐸𝑆𝐻 𝐻 𝐴𝑈𝑅 𝑈𝑆 𝐷𝐸𝑆𝐻 𝑀𝐸 तेरी मां घर घर जाके SAMBHOG करती है ! 🛐"
-        "Baap bhi bnale muje rndike",
+        "🇮🇳𝐵𝐻𝐴𝑅𝐴𝑇 𝐻𝐴𝑀𝐴𝑅𝐴 𝐷𝐸𝑆𝐻 𝐻 𝐴𝑈𝑅 𝑈𝑆 𝐷𝐸𝑆𝐻 𝑀𝐸 तेरी मां घर घर जाके SAMBHOG करती है ! 🛐Baap bhi bnale muje rndike",
         "Tera baap randibaaz ey yaad ey tujhe",
         "Tu apni Maa cuda na tympass",
         "Oye unfunny swipe mtt kr",
@@ -11400,8 +11391,7 @@ async def run_user_bot(session_string, chat_id):
         "lulle kha tri makabhosda",
         "tri bhn ki bhosdi beta",
         "tri ma rndi baat khtm",
-        "Sun ek maze ki baat batao kya teri maa randy ey"
-        "codu codu mako tery",
+        "Sun ek maze ki baat batao kya teri maa randy eycodu codu mako tery",
         "aj cud gai tery maa oye",
         "sun sun randy make bache tu",
         "kilas ny randyke",
@@ -11510,8 +11500,7 @@ async def run_user_bot(session_string, chat_id):
         "cp bol low level weak",
         "mere lund pe ey tu hijde",
         "free cudwa tery mako",
-        "Free mey cud tu randyke"
-        "speed ny weak tatte terme",
+        "Free mey cud tu randykespeed ny weak tatte terme",
         "kitni br cudwayega terymako",
         "lund le randibaaz bapka",
         "lun cus jaldi se randibaaz bapka",
@@ -11544,8 +11533,7 @@ async def run_user_bot(session_string, chat_id):
         "bc tery maki chut",
         "mc randyke likh fast",
         "fast likh randyke",
-        "fast likh kamzor"
-        "tery maki chut claim crwa",
+        "fast likh kamzortery maki chut claim crwa",
         "awz niche randce ke bche",
         "sawal ny puch tery makabosda",
         "fyter bnega lagde madrchod",
@@ -11559,8 +11547,7 @@ async def run_user_bot(session_string, chat_id):
         "bol randibaaz daddy ey",
         "bullyx randyke uth",
         "mar marke cud rha tu",
-        "or tery ma marke cud gai"
-        "Jaldi likh rndyke bej",
+        "or tery ma marke cud gaiJaldi likh rndyke bej",
         "Or bda likh tmc",
         "Or bda 2 line wla likh tmkc",
         "Or bda oye likh tml",
@@ -11600,8 +11587,7 @@ async def run_user_bot(session_string, chat_id):
         "ganda cyu cud rha tu ?",
         "itna gnda ny cud ache se cud",
         "Maan le cud gya tu sun bat ab",
-        "makafudda fat gya tery ruk"
-        "BAAP BHI BNALE MUJE RNDIKE",
+        "makafudda fat gya tery rukBAAP BHI BNALE MUJE RNDIKE",
         "TERA BAAP RANDIBAAZ EY YAAD EY TUJHE",
         "TU APNI MAA CUDA NA TYMPASS",
         "OYE UNFUNNY SWIPE MTT KR",
@@ -12184,8 +12170,7 @@ async def run_user_bot(session_string, chat_id):
         "ᴛᴜ ɴɪᴋᴀʟ ᴍᴀᴅᴀʀᴄʜᴏᴅ",
         "ᴄʜᴜᴘ ʀᴀɴᴅɪ ᴋᴇ ʙᴀᴄʜᴇ",
         "ᴛᴇʀᴀ ᴍᴀᴀ ᴍᴇʀɪ ᴊᴀᴀɴ ᴇʏ",
-        "ᴛᴇʀɪ ꜱᴇxʏ ʙᴀʜᴇɴ ᴋɪ ᴄʜᴜᴛ ᴏᴘ"
-        "👩🏿      👩🏻‍🦳        👵🏼         👱🏿‍♀️     \n👖      👖        👖         👖     \n\nतेरी बहन /तेरी माँ /तेरी दादि/ तेरीभुआ.\n\nसब की 𝐂hu𝐃𝐀i hogi",
+        "ᴛᴇʀɪ ꜱᴇxʏ ʙᴀʜᴇɴ ᴋɪ ᴄʜᴜᴛ ᴏᴘ👩🏿      👩🏻‍🦳        👵🏼         👱🏿‍♀️     \n👖      👖        👖         👖     \n\nतेरी बहन /तेरी माँ /तेरी दादि/ तेरीभुआ.\n\nसब की 𝐂hu𝐃𝐀i hogi",
         "तेरी माँ के（ ͜.人 ͜.）दबा दूंगा",
         "तेरी मा चुदी हुई थी\nचुदी हुई है\nऔर चुदी हुई रहेगी \n\n\"MARK MY WORD\" 😈",
         "𝐊ʏᴀ?\n𝐂ʏᴀ?\n𝐂ᴜᴀ?\n\n𝐌ᴛᴛ 𝐊ʀʀ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ɪ 𝐂ʜᴜᴛ 𝐏𝐞 𝐓ʜ𝐀ᴘᴘᴀᴅ 𝐌ᴀ𝐚ʀ 𝐃ᴜɴɢᴀ",
@@ -12273,38 +12258,7 @@ async def run_user_bot(session_string, chat_id):
         "Loading your maa ki chudai video 😳\n\n■■■■■■■■□\n99%",
         "Sun दोस्त terko ye तीन चीजे कभी nahi भूलनी chaiye  😁👇🏻🤙🏿\n\n1 :- तेरी औकात\n2 :- तेरी बहन का फटा bhosda\n3 :- तेरी मां के भोसड़े में मेरा मूत",
         "this message could't be display because teri maa randy ey",
-        "𓂃☁︎ 𓂃𝐒ɪᴅᴇ 𝐇ᴀᴛ 𝐆ᴜʟᴀᴍ 𝐓ᴇʀʏ 𝐌ᴀᴀ 𝐊ᴏ 𝐂ʜᴏᴅɴᴇ  मेरी रेलगाड़ी आ रही .-‘🚂-‘.ᯓᡣ𐭩______ 𓂃☁︎ 𓂃",
-        "˙✧˖°📷༘ ⋆｡° 𝐓ᴇʀʏ 𝐌ᴀ  𝐊ᴀ 𝐂ʜɪʟᴅ 𝐏ᴏʀɴ 𝐑ᴇᴄᴏʀᴅ 𝐇ᴏɢʏᴀ 𝐀ʙ 𝐓ᴏ 𝐒ɪᴅʜᴀ 𝐕ɪʀᴀʟ 𝐇ᴏɢᴀ 𝐘ᴇ ˙✧˖°📷༘ ⋆｡°",
-        "𓂃✍︎ 𝑵ʏ 𝑵ʏ 𝑨ʙ 𝑲ᴜᴄʜ 𝑵ʏ 𝑯ᴏ 𝑺ᴋᴛᴀ 𝑻ᴇʀɪ  𝑪ᴜᴅᴀɪ 𝑲ɪ 𝑺ᴄʀɪᴘᴛ 𝑨ʙ 𝑳ᴇᴀᴋ 𝑯ᴏᴋᴇ 𝑯ʏ 𝑴ᴀɴᴇɢɪ 𓂃✍︎",
-        "⋆⭒˚.⋆🔭 𝐒ʜᴜᴛ 𝐔ᴘ 𝐑ᴀɴᴅɪᴋᴇ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ɪ 𝐂ʜᴜᴅᴀɪ 𝐄ɴᴊᴏʏ 𝐊ʀ 𝐑ᴀʜᴀ 𝐓ᴇʟᴇ𝐒ᴄᴏᴘᴇ 𝐒ᴇ⋆⭒˚.⋆🔭",
-        "तेरे मां के दूदू के बीच मेरा lund fas gaya oops 🤪（ ͜.🍆 ͜.）",
-        "𝐓ᴇʀʏ 𝐁ʜᴇ𝐍 𝐊ᴇ ( ͜. ㅅ ͜. )🥛 ʏᴜᴍᴍʏ ",
-        "𓂃☁︎ 𓂃𝐒ɪᴅᴇ 𝐇ᴀᴛ 𝐆ᴜʟᴀᴍ 𝐓ᴇʀʏ 𝐌ᴀᴀ 𝐊ᴏ 𝐂ʜᴏᴅɴᴇ  मेरी रेलगाड़ी आ रही .-‘🚂-‘.ᯓᡣ𐭩______ 𓂃☁︎ 𓂃",
-        "˙✧˖°📷༘ ⋆｡° 𝐓ᴇʀʏ 𝐌ᴀ  𝐊ᴀ 𝐂ʜɪʟᴅ 𝐏ᴏʀɴ 𝐑ᴇᴄᴏʀᴅ 𝐇ᴏɢʏᴀ 𝐀ʙ 𝐓ᴏ 𝐒ɪᴅʜᴀ 𝐕ɪʀᴀʟ 𝐇ᴏɢᴀ 𝐘ᴇ ˙✧˖°📷༘ ⋆｡°",
-        "𓂃✍︎ 𝑵ʏ 𝑵ʏ 𝑨ʙ 𝑲ᴜᴄʜ 𝑵ʏ 𝑯ᴏ 𝑺ᴋᴛᴀ 𝑻ᴇʀɪ  𝑪ᴜᴅᴀɪ 𝑲ɪ 𝑺ᴄʀɪᴘᴛ 𝑨ʙ 𝑳ᴇᴀᴋ 𝑯ᴏᴋᴇ 𝑯ʏ 𝑴ᴀɴᴇɢɪ 𓂃✍︎",
-        "⋆⭒˚.⋆🔭 𝐒ʜᴜᴛ 𝐔ᴘ 𝐑ᴀɴᴅɪᴋᴇ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ɪ 𝐂ʜᴜᴅᴀɪ 𝐄ɴᴊᴏʏ 𝐊ʀ 𝐑ᴀʜᴀ 𝐓ᴇʟᴇ𝐒ᴄᴏᴘᴇ 𝐒ᴇ⋆⭒˚.⋆🔭",
-        "तेरे मां के दूदू के बीच मेरा lund fas gaya oops 🤪（ ͜.🍆 ͜.）",
-        "𝐓ᴇʀʏ 𝐁ʜᴇ𝐍 𝐊ᴇ ( ͜. ㅅ ͜. )🥛 ʏᴜᴍᴍʏ ",
-        "𓂃☁︎ 𓂃𝐒ɪᴅᴇ 𝐇ᴀᴛ 𝐆ᴜʟᴀᴍ 𝐓ᴇʀʏ 𝐌ᴀᴀ 𝐊ᴏ 𝐂ʜᴏᴅɴᴇ  मेरी रेलगाड़ी आ रही .-‘🚂-‘.ᯓᡣ𐭩______ 𓂃☁︎ 𓂃",
-        "˙✧˖°📷༘ ⋆｡° 𝐓ᴇʀʏ 𝐌ᴀ  𝐊ᴀ 𝐂ʜɪʟᴅ 𝐏ᴏʀɴ 𝐑ᴇᴄᴏʀᴅ 𝐇ᴏɢʏᴀ 𝐀ʙ 𝐓ᴏ 𝐒ɪᴅʜᴀ 𝐕ɪʀᴀʟ 𝐇ᴏɢᴀ 𝐘ᴇ ˙✧˖°📷༘ ⋆｡°",
-        "𓂃✍︎ 𝑵ʏ 𝑵ʏ 𝑨ʙ 𝑲ᴜᴄʜ 𝑵ʏ 𝑯ᴏ 𝑺ᴋᴛᴀ 𝑻ᴇʀɪ  𝑪ᴜᴅᴀɪ 𝑲ɪ 𝑺ᴄʀɪᴘᴛ 𝑨ʙ 𝑳ᴇᴀᴋ 𝑯ᴏᴋᴇ 𝑯ʏ 𝑴ᴀɴᴇɢɪ 𓂃✍︎",
-        "⋆⭒˚.⋆🔭 𝐒ʜᴜᴛ 𝐔ᴘ 𝐑ᴀɴᴅɪᴋᴇ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ɪ 𝐂ʜᴜᴅᴀɪ 𝐄ɴᴊᴏʏ 𝐊ʀ 𝐑ᴀʜᴀ 𝐓ᴇʟᴇ𝐒ᴄᴏᴘᴇ 𝐒ᴇ⋆⭒˚.⋆🔭",
-        "🇮🇳 ✦ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ᴇ 𝐒ᴀᴛʜ  ⚡️ZYЯΣX ✕ ΛΣƬΉΣЯ⚡️  𝐁ᴀᴀᴘ 𝐀ᴜʀ  𝐈ɴᴅɪᴀ 𝐖ᴀʟᴇ 𝐁ʜɪ 𝐂ʜɪʟʟ 𝐊ᴀʀ 𝐑ʜᴇ ✦ 🇮🇳",
-        "🇯🇵 ✦ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ᴇ 𝐒ᴀᴛʜ  ⚡️ZYЯΣX ✕ ΛΣƬΉΣЯ⚡️  𝐁ᴀᴀᴘ 𝐀ᴜʀ  𝐉ᴀᴘᴀɴ 𝐖ᴀʟᴇ 𝐁ʜɪ 𝐂ʜɪʟʟ 𝐊ᴀʀ 𝐑ʜᴇ ✦ 🇯🇵",
-        "🇺🇸 ✦ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ᴇ 𝐒ᴀᴛʜ  ⚡️ZYЯΣX ✕ ΛΣƬΉΣЯ⚡️  𝐁ᴀᴀᴘ 𝐀ᴜʀ  𝐔𝐒𝐀 𝐖ᴀʟᴇ 𝐁ʜɪ 𝐂ʜɪʟʟ 𝐊ᴀʀ 𝐑ʜᴇ ✦ 🇺🇸",
-        "🇬🇧 ✦ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ᴇ 𝐒ᴀᴛʜ  ⚡️ZYЯΣX ✕ ΛΣƬΉΣЯ⚡️  𝐁ᴀᴀᴘ 𝐀ᴜʀ  𝐔𝐊 𝐖ᴀʟᴇ 𝐁ʜɪ 𝐂ʜɪʟʟ 𝐊ᴀʀ 𝐑ʜᴇ ✦ 🇬🇧",
-        "🇰🇷 ✦ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ᴇ 𝐒ᴀᴛʜ  ⚡️ZYЯΣX ✕ ΛΣƬΉΣЯ⚡️  𝐁ᴀᴀᴘ 𝐀ᴜʀ  𝐊ᴏʀᴇᴀ 𝐖ᴀʟᴇ 𝐁ʜɪ 𝐂ʜɪʟʟ 𝐊ᴀʀ 𝐑ʜᴇ ✦ 🇰🇷",
-        "🇩🇪 ✦ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ᴇ 𝐒ᴀᴛʜ  ⚡️ZYЯΣX ✕ ΛΣƬΉΣЯ⚡️  𝐁ᴀᴀᴘ 𝐀ᴜʀ  𝐆ᴇʀᴍᴀɴʏ 𝐖ᴀʟᴇ 𝐁ʜɪ 𝐂ʜɪʟʟ 𝐊ᴀʀ 𝐑ʜᴇ ✦ 🇩🇪",
-        "🇫🇷 ✦ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ᴇ 𝐒ᴀᴛʜ  ⚡️ZYЯΣX ✕ ΛΣƬΉΣЯ⚡️  𝐁ᴀᴀᴘ 𝐀ᴜʀ  𝐅ʀᴀɴᴄᴇ 𝐖ᴀʟᴇ 𝐁ʜɪ 𝐂ʜɪʟʟ 𝐊ᴀʀ 𝐑ʜᴇ ✦ 🇫🇷",
-        "🇮🇹 ✦ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ᴇ 𝐒ᴀᴛʜ  ⚡️ZYЯΣX ✕ ΛΣƬΉΣЯ⚡️  𝐁ᴀᴀᴘ 𝐀ᴜʀ  𝐈ᴛᴀʟʏ 𝐖ᴀʟᴇ 𝐁ʜɪ 𝐂ʜɪʟʟ 𝐊ᴀʀ 𝐑ʜᴇ ✦ 🇮🇹",
-        "🇧🇷 ✦ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ᴇ 𝐒ᴀᴛʜ  ⚡️ZYЯΣX ✕ ΛΣƬΉΣЯ⚡️  𝐁ᴀᴀᴘ 𝐀ᴜʀ  𝐁ʀᴀᴢɪʟ 𝐖ᴀʟᴇ 𝐁ʜɪ 𝐂ʜɪʟʟ 𝐊ᴀʀ 𝐑ʜᴇ ✦ 🇧🇷",
-        "🇨🇦 ✦ 𝐓ᴇʀɪ 𝐌ᴀᴀ 𝐊ᴇ 𝐒ᴀᴛʜ  ⚡️ZYЯΣX ✕ ΛΣƬΉΣЯ⚡️  𝐁ᴀᴀᴘ 𝐀ᴜʀ  𝐂ᴀɴᴀᴅᴀ 𝐖ᴀʟᴇ 𝐁ʜɪ 𝐂ʜɪʟʟ 𝐊ᴀʀ 𝐑ʜᴇ ✦ 🇨🇦",
-        "𓂃˖˳·˖ ִֶָ ⋆🧡͙⋆ ִֶָ˖·˳˖𓂃 ִֶָ⁀➴༯ 𝐒𝐋𝐀𝐕𝐄 ִֶָ. ..𓂃 ࣪ ִֶָ🌈་༘࿐ 𝐓𝐌𝐊𝐂 -/- ⋆˚🧡 ݁˖⭑.ᐟ",
-        "𓂃˖˳·˖ ִֶָ ⋆💛͙⋆ ִֶָ˖·˳˖𓂃 ִֶָ⁀➴༯ 𝐒𝐋𝐀𝐕𝐄 ִֶָ. ..𓂃 ࣪ ִֶָ🌈་༘࿐ 𝐓𝐌𝐊𝐂 -/- ⋆˚💛 ݁˖⭑.ᐟ",
-        "𓂃˖˳·˖ ִֶָ ⋆💚͙⋆ ִֶָ˖·˳˖𓂃 ִֶָ⁀➴༯ 𝐒𝐋𝐀𝐕𝐄 ִֶָ. ..𓂃 ࣪ ִֶָ🌈་༘࿐ 𝐓𝐌𝐊𝐂 -/- ⋆˚💚 ݁˖⭑.ᐟ",
-        "𓂃˖˳·˖ ִֶָ ⋆💙͙⋆ ִֶָ˖·˳˖𓂃 ִֶָ⁀➴༯ 𝐒𝐋𝐀𝐕𝐄 ִֶָ. ..𓂃 ࣪ ִֶָ🌈་༘࿐ 𝐓𝐌𝐊𝐂 -/- ⋆˚💙 ݁˖⭑.ᐟ",
         ]
-
         # ─── FUN RAIDS TEXT LISTS (Menu8) ──────────────────────────────────────
 
         shayari_texts = [
@@ -18477,7 +18431,7 @@ async def run_user_bot(session_string, chat_id):
                 await status_msg(event, "Target is protected")
                 return
             user_bot.mention_raid[target.id] = None  # infinite until stop
-            await status_msg(event, f"Mention raid ON → {target.id}")
+            await status_msg(event, fancy_status("start", f"ᴍᴇɴᴛɪᴏɴ ʀᴀɪᴅ → {target.id}"))
 
         @register_cmd("smentionraid")
         async def cmd_smentionraid(event, args):
@@ -18495,10 +18449,10 @@ async def run_user_bot(session_string, chat_id):
                     pass
             if tid and tid in user_bot.mention_raid:
                 del user_bot.mention_raid[tid]
-                await status_msg(event, "Mention raid stopped for target")
+                await status_msg(event, fancy_status("stop", "ᴍᴇɴᴛɪᴏɴ ʀᴀɪᴅ ꜱᴛᴏᴘᴘᴇᴅ"))
             else:
                 user_bot.mention_raid.clear()
-                await status_msg(event, "All mention raids cleared")
+                await status_msg(event, fancy_status("stop", "ᴀʟʟ ᴍᴇɴᴛɪᴏɴ ʀᴀɪᴅꜱ ᴄʟᴇᴀʀᴇᴅ"))
 
         @register_cmd("mentionspam")
         async def cmd_mentionspam(event, args):
@@ -18524,9 +18478,7 @@ async def run_user_bot(session_string, chat_id):
                     mention = f"[{ent.first_name or 'user'}](tg://user?id={ent.id})"
                 except Exception:
                     mention = args.strip().split()[0]
-            texts = getattr(user_bot, "deathgod_texts", None) or [
-                "🔥", "💀", "⚡", "Get rekt", "Stay mad", "Cope", "Seethe", "L + ratio"
-            ]
+            texts = deathgod_replies if deathgod_replies else ["🔥"]
             async def _loop():
                 try:
                     while True:
@@ -18541,7 +18493,7 @@ async def run_user_bot(session_string, chat_id):
                     user_bot.mention_spam_tasks.pop(chat, None)
             task = asyncio.create_task(_loop())
             user_bot.mention_spam_tasks[chat] = task
-            await status_msg(event, "Mention spam started")
+            await status_msg(event, fancy_status("start", "ᴍᴇɴᴛɪᴏɴ ꜱᴘᴀᴍ"))
 
         @register_cmd("smentionspam")
         async def cmd_smentionspam(event, args):
@@ -18551,7 +18503,7 @@ async def run_user_bot(session_string, chat_id):
             t = user_bot.mention_spam_tasks.pop(chat, None)
             if t:
                 t.cancel()
-                await status_msg(event, "Mention spam stopped")
+                await status_msg(event, fancy_status("stop", "ᴍᴇɴᴛɪᴏɴ ꜱᴘᴀᴍ"))
             else:
                 await status_msg(event, "No mention spam in this chat")
 
@@ -18634,14 +18586,14 @@ async def run_user_bot(session_string, chat_id):
                 return
             user_bot.sticker_raid[target.id] = None
             user_bot._sticker_ids_cache = ids
-            await status_msg(event, f"Sticker raid ON → {target.id}")
+            await status_msg(event, fancy_status("start", f"ꜱᴛɪᴄᴋᴇʀ ʀᴀɪᴅ → {target.id}"))
 
         @register_cmd("sstickerraid")
         async def cmd_sstickerraid(event, args):
             if not is_admin(event.sender_id):
                 return
             user_bot.sticker_raid.clear()
-            await status_msg(event, "Sticker raid cleared")
+            await status_msg(event, fancy_status("stop", "ꜱᴛɪᴄᴋᴇʀ ʀᴀɪᴅ"))
 
         @register_cmd("stickerspam")
         async def cmd_stickerspam(event, args):
@@ -18673,7 +18625,7 @@ async def run_user_bot(session_string, chat_id):
                     user_bot.sticker_spam_tasks.pop(chat, None)
             task = asyncio.create_task(_loop())
             user_bot.sticker_spam_tasks[chat] = task
-            await status_msg(event, "Sticker spam started")
+            await status_msg(event, fancy_status("start", "ꜱᴛɪᴄᴋᴇʀ ꜱᴘᴀᴍ"))
 
         @register_cmd("sstickerspam")
         async def cmd_sstickerspam(event, args):
@@ -18683,7 +18635,7 @@ async def run_user_bot(session_string, chat_id):
             t = user_bot.sticker_spam_tasks.pop(chat, None)
             if t:
                 t.cancel()
-                await status_msg(event, "Sticker spam stopped")
+                await status_msg(event, fancy_status("stop", "ꜱᴛɪᴄᴋᴇʀ ꜱᴘᴀᴍ"))
             else:
                 await status_msg(event, "No sticker spam here")
 
@@ -18771,7 +18723,7 @@ async def run_user_bot(session_string, chat_id):
                     await safe_send(chat, "🚫 Protected from mention raid.", reply_to=event.id)
                 else:
                     mention = f"[{getattr(event.sender, 'first_name', None) or 'user'}](tg://user?id={sender})"
-                    base = random.choice(getattr(user_bot, "deathgod_texts", None) or ["🔥", "💀", "⚡"])
+                    base = random.choice(deathgod_replies) if deathgod_replies else "🔥"
                     await safe_send(chat, f"{mention} {base}", reply_to=event.id)
                 return
 

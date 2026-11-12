@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv()
 import asyncio
 import os
 import time
@@ -36,6 +38,11 @@ from telethon.tl.functions.contacts import BlockRequest, UnblockRequest   # ✅ 
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+
+# CONFIG GUARD
+if __name__ == "__main__" and (not API_ID or not API_HASH or not BOT_TOKEN):
+    raise SystemExit("Missing API_ID / API_HASH / BOT_TOKEN")
+
 MY_OWNER_IDS = {int(x) for x in os.environ.get("OWNER_IDS", "8909378644,8711082433").split(",") if x.strip()}
 UPI_ID = os.environ.get("UPI_ID", "paryush01@nyes")
 QR_IMAGE_PATH = os.environ.get("QR_IMAGE_PATH", "upi_qr.jpg")
@@ -189,6 +196,21 @@ async def init_db():
                 reply_type TEXT DEFAULT 'text',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (user_id, trigger_word)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_media (
+                key_name TEXT PRIMARY KEY,
+                file_id TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_sticker_packs (
+                user_id BIGINT,
+                pack_name TEXT,
+                sticker_ids TEXT,
+                PRIMARY KEY (user_id, pack_name)
             )
         """)
         await conn.execute("""
@@ -398,6 +420,107 @@ async def is_protected(target_user: int, command: str) -> bool:
     protections = await get_protections(target_user)
     return command in protections
 
+
+# ─── START VIDEO + STICKER PACK HELPERS ─────────────────────────────
+async def set_app_media(key: str, file_id: str):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO app_media (key_name, file_id)
+            VALUES ($1, $2)
+            ON CONFLICT (key_name) DO UPDATE SET file_id = $2, updated_at = CURRENT_TIMESTAMP
+            """,
+            key, file_id,
+        )
+
+async def get_app_media(key: str) -> Optional[str]:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT file_id FROM app_media WHERE key_name=$1", key)
+        return row["file_id"] if row else None
+
+async def save_sticker_pack(user_id: int, pack_name: str, sticker_ids: list):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_sticker_packs (user_id, pack_name, sticker_ids)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, pack_name) DO UPDATE SET sticker_ids = $3
+            """,
+            user_id, pack_name, json.dumps(sticker_ids),
+        )
+
+async def list_sticker_packs(user_id: int) -> list:
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT pack_name, sticker_ids FROM user_sticker_packs WHERE user_id=$1",
+            user_id,
+        )
+    out = []
+    for r in rows:
+        try:
+            ids = json.loads(r["sticker_ids"] or "[]")
+        except Exception:
+            ids = []
+        out.append({"name": r["pack_name"], "ids": ids})
+    return out
+
+async def remove_sticker_pack(user_id: int, pack_name: str):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM user_sticker_packs WHERE user_id=$1 AND pack_name=$2",
+            user_id, pack_name,
+        )
+
+async def get_all_sticker_ids(user_id: int) -> list:
+    packs = await list_sticker_packs(user_id)
+    ids = []
+    for p in packs:
+        ids.extend(p.get("ids") or [])
+    return ids
+
+async def owner_stats() -> dict:
+    async with db_pool.acquire() as conn:
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM user_sessions") or 0
+        premium = await conn.fetchval(
+            "SELECT COUNT(*) FROM premium_users WHERE status='active' AND (expiry_date IS NULL OR expiry_date > CURRENT_TIMESTAMP)"
+        ) or 0
+        wallet_sum = await conn.fetchval("SELECT COALESCE(SUM(balance),0) FROM user_wallet") or 0
+    return {
+        "registered": int(total_users),
+        "active_userbots": len(active_userbots),
+        "premium": int(premium),
+        "wallet_total": float(wallet_sum),
+        "broadcast_users": len(broadcast_users),
+    }
+
+async def export_owner_backup() -> str:
+    """Write a JSON backup and return path."""
+    async with db_pool.acquire() as conn:
+        sessions = await conn.fetch("SELECT user_id, updated_at FROM user_sessions")
+        premium = await conn.fetch("SELECT user_id, plan, expiry_date, status FROM premium_users")
+        wallets = await conn.fetch("SELECT user_id, balance FROM user_wallet")
+    data = {
+        "exported_at": datetime.now().isoformat(),
+        "sessions": [{"user_id": r["user_id"], "updated_at": str(r["updated_at"])} for r in sessions],
+        "premium": [
+            {
+                "user_id": r["user_id"],
+                "plan": r["plan"],
+                "expiry_date": str(r["expiry_date"]),
+                "status": r["status"],
+            }
+            for r in premium
+        ],
+        "wallets": [{"user_id": r["user_id"], "balance": float(r["balance"])} for r in wallets],
+        "broadcast_users": list(broadcast_users),
+        "active_userbots": list(active_userbots.keys()),
+    }
+    path = "owner_backup.json"
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+    return path
+
+
 # ─── MAIN BOT ─────────────────────────────────────────────────────
 MAIN_BOT_CLIENT = TelegramClient(
     "main_bot_session",
@@ -582,6 +705,11 @@ MENU_3 = build_box("💣 SPAM & TEXT", [
     "  ◆  DEATHGOD  ◆",
     "",
     "  ▸ .deathgod   → Start deathgod",
+    "  ▸ .mentionraid / .smentionraid",
+    "  ▸ .mentionspam / .smentionspam",
+    "  ▸ .stickerraid / .sstickerraid",
+    "  ▸ .stickerspam / .sstickerspam",
+    "  ▸ .addstickerpack / .liststickerpack",
     "  ▸ .sdeathgod  → Stop deathgod",
     "",
     "  ◆  OWS SPAM (Sequential)  ◆",
@@ -1188,37 +1316,83 @@ async def start_handler(event):
     user_id = event.sender_id
     broadcast_users.add(user_id)
     save_users(broadcast_users)
-    buttons = [
-        [Button.inline("💎 Buy Premium", data="buy_menu")],
-        [Button.inline("💰 Deposit / Check Balance", data="deposit")],
-        [Button.inline("🎟️ Redeem Code", data="redeem_prompt")],
-        [Button.url("🔗 Premium Features", url=PREMIUM_FEATURES_LINK)],
-    ]
-    bal = await get_balance(user_id)
+
+    # Welcome video if configured
+    video_id = None
+    try:
+        video_id = await get_app_media("start_video")
+    except Exception:
+        video_id = None
+    global _START_VIDEO_MEDIA
+    if _START_VIDEO_MEDIA is not None:
+        try:
+            await event.respond(file=_START_VIDEO_MEDIA)
+        except Exception:
+            pass
+    elif video_id:
+        try:
+            await event.respond(file=video_id)
+        except Exception:
+            pass
+
+    is_owner = user_id in MY_OWNER_IDS
+    is_active = user_id in active_userbots
+    bal = 0.0
+    try:
+        bal = await get_balance(user_id)
+    except Exception:
+        pass
+
+    if is_active:
+        status_line = "🟢 **Your Userbot is Active**"
+    else:
+        status_line = "⚪ Userbot offline — use **Login** to start"
+
     intro = (
-        "╔═══════════════════════════════════════════╗\n"
-        "║  ✦ 👑 ⚡️ZYЯΣX ✕ ΛΣƬΉΣЯ⚡️ 𝐀𝐔𝐓𝐎-𝐃𝐄𝐏𝐋𝐎𝐘 👑 ✦  ║\n"
-        "╚═══════════════════════════════════════════╝\n\n"
-        f"Welcome to the **Ultimate Userbot Manager**.\n"
-        f"• To start your personal userbot, type `/login`\n"
-        f"• To stop it, use `/logout`\n"
-        f"• Use the buttons below to buy premium or deposit.\n\n"
-        f"💰 **Your Wallet Balance:** ₹{bal:.2f}\n\n"
-        "Enjoy the premium experience! 🚀"
+        "╔══════════════════════════════════╗\n"
+        "║  ⚡️ ZYЯΣX ✕ ΛΣƬΉΣЯ  AUTO-DEPLOY  ║\n"
+        "╚══════════════════════════════════╝\n\n"
+        f"{status_line}\n"
+        f"💰 Wallet: **₹{bal:.2f}**\n\n"
+        "Deploy your personal userbot, unlock premium raids,\n"
+        "and manage everything from one place."
     )
+
+    buttons = [
+        [Button.inline("🚀 Login / Start Userbot", data="start_login")],
+        [
+            Button.inline("💎 Premium Plans", data="buy_menu"),
+            Button.inline("🎟️ Redeem Code", data="redeem_prompt"),
+        ],
+        [
+            Button.inline("📖 Help / Features", data="help_features"),
+            Button.inline("🆘 Support", data="support_btn"),
+        ],
+    ]
+    if is_owner:
+        buttons.append([Button.inline("🛠 Owner Panel", data="owner_panel")])
+    if is_active:
+        buttons.append([Button.inline("⏹ Logout Userbot", data="start_logout")])
+
     await safe_reply(event, intro, buttons=buttons)
+
     not_joined = []
     for ch in REQUIRED_CHANNELS:
-        if not await is_user_in_channel(user_id, ch):
-            not_joined.append(ch)
+        try:
+            if not await is_user_in_channel(user_id, ch):
+                not_joined.append(ch)
+        except Exception:
+            pass
     if not_joined:
         force_join_msg = (
-            "⚠️═══⟦ ꜰᴏʀᴄᴇ ᴊᴏɪɴ ʀᴇqᴜɪʀᴇᴅ ⟧═══⚠️\n\n"
-            "✧➤ ᴘʟᴇᴀꜱᴇ ᴊᴏɪɴ ᴀʟʟ 4 ᴄʜᴀɴɴᴇʟꜱ ᴛᴏ\n"
-            "   ᴜꜱᴇ ᴛʜɪꜱ ʙᴏᴛ ᴀɴᴅ ᴅᴇᴘʟᴏʏ\n"
-            "❀═════════════════════════════❀"
+            "⚠️ **Force Join Required**\n\n"
+            "Join the channels below to unlock full access."
         )
-        await safe_respond(event, force_join_msg, buttons=get_join_buttons())
+        try:
+            await safe_respond(event, force_join_msg, buttons=get_join_buttons())
+        except Exception:
+            pass
+
 
 @MAIN_BOT_CLIENT.on(events.NewMessage(pattern="/freeze"))
 async def freeze_cmd(event):
@@ -1469,7 +1643,146 @@ async def handle_login_password(event):
 
 @MAIN_BOT_CLIENT.on(events.CallbackQuery)
 async def callback_handler(event):
-    data = event.data.decode()
+    data = event.data.decode() if isinstance(event.data, (bytes, bytearray)) else event.data
+    if isinstance(data, bytes):
+        data = data.decode()
+    user_id = event.sender_id
+
+    # ── Start / Owner quick routes ──
+    if data == "start_login":
+        await event.answer()
+        await event.respond("Send `/login` to begin phone authentication.")
+        return
+    if data == "start_logout":
+        await event.answer()
+        await event.respond("Send `/logout` to stop your userbot.")
+        return
+    if data == "help_features":
+        await event.answer()
+        await event.respond(
+            "📖 **Features**\n"
+            "• Personal userbot with 500+ commands\n"
+            "• Raid / spam engine with premium protection\n"
+            "• Clone profile, sticker packs, mention raids\n"
+            "• Wallet + redeem codes\n"
+            "Type `.menu` inside your userbot after login."
+        )
+        return
+    if data == "support_btn":
+        await event.answer()
+        await event.respond("🆘 Contact the owner from the Premium Features channel or DM.")
+        return
+    if data == "owner_panel":
+        if user_id not in MY_OWNER_IDS:
+            await event.answer("Owners only.", alert=True)
+            return
+        await event.answer()
+        stats = await owner_stats()
+        panel = (
+            "╔════════ OWNER PANEL ════════╗\n"
+            f"║ Users: {stats['registered']:<5} Active: {stats['active_userbots']:<4} ║\n"
+            f"║ Premium: {stats['premium']:<4} Wallet ₹{stats['wallet_total']:<7.0f}║\n"
+            "╚═════════════════════════════╝"
+        )
+        buttons = [
+            [Button.inline("📢 Broadcast", data="own_broadcast")],
+            [Button.inline("🎁 Gift Premium", data="own_gift"), Button.inline("🎟️ Gen Redeem", data="own_gencode")],
+            [Button.inline("🎬 Set Start Video", data="own_setvideo"), Button.inline("💾 Backup DB", data="own_backup")],
+            [Button.inline("📊 Stats", data="own_stats"), Button.inline(" freeze list", data="own_freezelist")],
+            [Button.inline("👥 Active Userbots", data="own_active")],
+        ]
+        try:
+            await event.edit(panel, buttons=buttons)
+        except Exception:
+            await event.respond(panel, buttons=buttons)
+        return
+    if data == "own_stats":
+        if user_id not in MY_OWNER_IDS:
+            await event.answer("Owners only.", alert=True)
+            return
+        stats = await owner_stats()
+        await event.answer()
+        await event.respond(
+            "📊 **Dashboard**\n"
+            f"• Registered sessions: `{stats['registered']}`\n"
+            f"• Active userbots: `{stats['active_userbots']}`\n"
+            f"• Premium active: `{stats['premium']}`\n"
+            f"• Broadcast list: `{stats['broadcast_users']}`\n"
+            f"• Wallet total: `₹{stats['wallet_total']:.2f}`"
+        )
+        return
+    if data == "own_backup":
+        if user_id not in MY_OWNER_IDS:
+            await event.answer("Owners only.", alert=True)
+            return
+        await event.answer("Building backup...")
+        try:
+            path = await export_owner_backup()
+            await event.respond(file=path, caption="💾 Owner DB backup")
+        except Exception as e:
+            await event.respond(f"Backup failed: {e}")
+        return
+    if data == "own_active":
+        if user_id not in MY_OWNER_IDS:
+            await event.answer("Owners only.", alert=True)
+            return
+        await event.answer()
+        ids = list(active_userbots.keys())
+        if not ids:
+            await event.respond("No active userbots.")
+        else:
+            lines = "\n".join(f"• `{i}`" for i in ids[:50])
+            more = f"\n… +{len(ids)-50} more" if len(ids) > 50 else ""
+            await event.respond(f"👥 **Active userbots ({len(ids)})**\n{lines}{more}")
+        return
+    if data == "own_setvideo":
+        if user_id not in MY_OWNER_IDS:
+            await event.answer("Owners only.", alert=True)
+            return
+        user_states[user_id] = {"step": "owner_set_start_video"}
+        await event.answer()
+        await event.respond("🎬 Reply to a **video** message with `/setstartvideo` or just send the video now.")
+        return
+    if data == "own_broadcast":
+        if user_id not in MY_OWNER_IDS:
+            await event.answer("Owners only.", alert=True)
+            return
+        user_states[user_id] = {"step": "owner_broadcast"}
+        await event.answer()
+        await event.respond("📢 Send the broadcast message now (text).")
+        return
+    if data == "own_gift":
+        if user_id not in MY_OWNER_IDS:
+            await event.answer("Owners only.", alert=True)
+            return
+        user_states[user_id] = {"step": "owner_gift"}
+        await event.answer()
+        await event.respond("🎁 Send: `<user_id> <days> <plan>`\nExample: `123456789 30 monthly`")
+        return
+    if data == "own_gencode":
+        if user_id not in MY_OWNER_IDS:
+            await event.answer("Owners only.", alert=True)
+            return
+        user_states[user_id] = {"step": "owner_gencode"}
+        await event.answer()
+        await event.respond("🎟️ Send: `<amount> <max_uses> <expiry_days>`\nExample: `50 10 7`")
+        return
+    if data == "own_freezelist":
+        if user_id not in MY_OWNER_IDS:
+            await event.answer("Owners only.", alert=True)
+            return
+        await event.answer()
+        try:
+            async with db_pool.acquire() as conn:
+                rows = await conn.fetch("SELECT user_id FROM user_freeze WHERE frozen=TRUE")
+            if not rows:
+                await event.respond("No frozen users.")
+            else:
+                await event.respond("❄️ Frozen:\n" + "\n".join(f"`{r['user_id']}`" for r in rows))
+        except Exception as e:
+            await event.respond(f"Error: {e}")
+        return
+
     if data == "verify_channels":
         user_id = event.sender_id
         not_joined = []
@@ -2111,6 +2424,7 @@ async def run_user_bot(session_string, chat_id):
             API_HASH,
             auto_reconnect=True,
             connection_retries=10,
+            loop=asyncio.get_running_loop(),
           
         )
         await user_bot.start()
@@ -2157,8 +2471,18 @@ async def run_user_bot(session_string, chat_id):
         user_bot.CLONE_ACTIVE = False
         user_bot.LAST_CLONE_ID = None
         user_bot.CLONE_DATA = {
-            "name": None, "last": None, "bio": None, "photo_bytes": None
+            "name": None,
+            "last": None,
+            "bio": None,
+            "username": None,
+            "photo_bytes": None,
         }
+        user_bot.mention_raid = {}          # target_id -> remaining|None
+        user_bot.mention_spam_tasks = {}    # chat_id -> task
+        user_bot.sticker_raid = {}           # target_id -> remaining|None
+        user_bot.sticker_spam_tasks = {}     # chat_id -> task
+        user_bot.mention_spam_target = {}   # chat_id -> target entity/name
+
         user_bot.SPRAY_DELAY = 0.1
         user_bot.GC_FAST_EMOJIS = [
             "❤️","🧡","💛","💚","💙","💜",
@@ -13788,6 +14112,16 @@ async def run_user_bot(session_string, chat_id):
                 except:
                     pass
             user_bot.spray_tasks.clear()
+            for _t in list(getattr(user_bot, 'mention_spam_tasks', {}).values()):
+                try: _t.cancel()
+                except Exception: pass
+            getattr(user_bot, 'mention_spam_tasks', {}).clear()
+            for _t in list(getattr(user_bot, 'sticker_spam_tasks', {}).values()):
+                try: _t.cancel()
+                except Exception: pass
+            getattr(user_bot, 'sticker_spam_tasks', {}).clear()
+            getattr(user_bot, 'mention_raid', {}).clear()
+            getattr(user_bot, 'sticker_raid', {}).clear()
 
             user_bot.reply_users.clear()
             user_bot.rr_users.clear()
@@ -17236,74 +17570,118 @@ async def run_user_bot(session_string, chat_id):
                 try:
                     if reply.sender_id:
                         target = await user_bot.get_entity(reply.sender_id)
-                except:
+                except Exception:
                     pass
                 if not target and getattr(reply, "fwd_from", None):
                     try:
                         fid = reply.fwd_from.from_id
                         if fid:
                             target = await user_bot.get_entity(fid)
-                    except:
+                    except Exception:
                         pass
             if not target and args:
                 try:
                     target = await user_bot.get_entity(args.strip())
-                except:
+                except Exception:
                     pass
             if not target:
+                await status_msg(event, "❌ Reply to a user or pass @username / id")
                 return
             me2 = await user_bot.get_me()
             if target.id == me2.id:
+                await status_msg(event, "❌ Cannot clone yourself")
                 return
             if user_bot.CLONE_ACTIVE and user_bot.LAST_CLONE_ID == target.id:
+                await status_msg(event, "ℹ️ Already cloned this user")
                 return
+
             await status_msg(event, "⚡ Clone Init...")
+
+            # Snapshot original profile only on first clone of the session
             if not user_bot.CLONE_ACTIVE:
                 try:
-                    full = await user_bot(functions.users.GetFullUserRequest(me2.id))
-                    user_bot.CLONE_DATA["name"] = me2.first_name
-                    user_bot.CLONE_DATA["last"] = me2.last_name
-                    user_bot.CLONE_DATA["bio"] = full.full_user.about
-                    user_bot.CLONE_DATA["username"] = me2.username
+                    full_me = await user_bot(functions.users.GetFullUserRequest(me2.id))
+                    user_bot.CLONE_DATA["name"] = me2.first_name or ""
+                    user_bot.CLONE_DATA["last"] = me2.last_name or ""
+                    user_bot.CLONE_DATA["bio"] = (full_me.full_user.about or "")[:70]
+                    user_bot.CLONE_DATA["username"] = me2.username or ""
                     dp = await user_bot.download_profile_photo("me", file=bytes, download_big=True)
                     if dp:
-                        bio = BytesIO(dp)
-                        bio.name = "orig.jpg"
-                        user_bot.CLONE_DATA["photo_bytes"] = bio
+                        buf = BytesIO(dp)
+                        buf.name = "orig.jpg"
+                        buf.seek(0)
+                        user_bot.CLONE_DATA["photo_bytes"] = buf
+                    else:
+                        user_bot.CLONE_DATA["photo_bytes"] = None
                     user_bot.CLONE_ACTIVE = True
-                except:
-                    pass
+                except Exception as e:
+                    await status_msg(event, f"❌ Failed to snapshot original: {e}")
+                    return
+
             try:
+                # Name
                 await status_msg(event, "⚡ Cloning Name...")
                 await user_bot(functions.account.UpdateProfileRequest(
-                    first_name=target.first_name or "",
-                    last_name=target.last_name or ""
+                    first_name=(target.first_name or "")[:64],
+                    last_name=(target.last_name or "")[:64]
                 ))
+                await asyncio.sleep(0.4)
+
+                # Bio
                 await status_msg(event, "⚡ Cloning Bio...")
                 tfull = await user_bot(functions.users.GetFullUserRequest(target.id))
                 bio_text = (tfull.full_user.about or "")[:70]
                 await user_bot(functions.account.UpdateProfileRequest(about=""))
-                await asyncio.sleep(0.7)
+                await asyncio.sleep(0.6)
                 await user_bot(functions.account.UpdateProfileRequest(about=bio_text))
+                await asyncio.sleep(0.4)
+
+                # Profile photo
                 await status_msg(event, "⚡ Cloning PFP...")
                 file = await user_bot.download_profile_photo(target, file=bytes, download_big=True)
                 if file:
-                    bio = BytesIO(file)
-                    bio.name = "clone.jpg"
-                    up = await user_bot.upload_file(bio)
-                    cur = await user_bot.get_profile_photos("me", limit=1)
-                    if cur:
-                        await user_bot(functions.photos.DeletePhotosRequest(id=[cur[0]]))
+                    buf = BytesIO(file)
+                    buf.name = "clone.jpg"
+                    buf.seek(0)
+                    up = await user_bot.upload_file(buf)
+                    # remove current photo first so the new one becomes primary
+                    try:
+                        cur = await user_bot.get_profile_photos("me", limit=1)
+                        if cur:
+                            await user_bot(functions.photos.DeletePhotosRequest(id=[cur[0]]))
+                            await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
                     await user_bot(functions.photos.UploadProfilePhotoRequest(file=up))
-                # ─── CLONE USERNAME ───
-                if target.username:
+                    await asyncio.sleep(0.5)
+                else:
+                    # target has no photo → clear ours
+                    try:
+                        cur = await user_bot.get_profile_photos("me", limit=5)
+                        if cur:
+                            await user_bot(functions.photos.DeletePhotosRequest(id=list(cur)))
+                    except Exception:
+                        pass
+
+                # Username (best-effort)
+                if getattr(target, "username", None):
                     try:
                         await status_msg(event, "⚡ Cloning Username...")
+                        # clear own first so Telegram accepts the swap when possible
+                        try:
+                            await user_bot(functions.account.UpdateUsernameRequest(username=""))
+                            await asyncio.sleep(0.8)
+                        except Exception:
+                            pass
                         await user_bot(functions.account.UpdateUsernameRequest(username=target.username))
                     except Exception as ue:
                         print(f"Username clone failed: {ue}")
+
                 user_bot.LAST_CLONE_ID = target.id
-                await status_msg(event, "✅ Clone Complete")
+                await status_msg(event, f"✅ Cloned {target.first_name or target.id}")
+            except FloodWaitError as fw:
+                await status_msg(event, f"⏳ FloodWait {fw.seconds}s — try again later")
+                await asyncio.sleep(fw.seconds + 1)
             except Exception as e:
                 await status_msg(event, f"❌ Clone error: {e}")
 
@@ -17312,35 +17690,59 @@ async def run_user_bot(session_string, chat_id):
             if not is_admin(event.sender_id):
                 return
             if not user_bot.CLONE_ACTIVE:
+                await status_msg(event, "ℹ️ No active clone to restore")
                 return
             try:
-                await status_msg(event, "⚡ Restoring...")
+                await status_msg(event, "⚡ Restoring original...")
+
+                # Name
                 await user_bot(functions.account.UpdateProfileRequest(
                     first_name=user_bot.CLONE_DATA.get("name") or "",
                     last_name=user_bot.CLONE_DATA.get("last") or ""
                 ))
+                await asyncio.sleep(0.4)
+
+                # Bio
                 await user_bot(functions.account.UpdateProfileRequest(about=""))
-                await asyncio.sleep(0.7)
-                await user_bot(functions.account.UpdateProfileRequest(about=user_bot.CLONE_DATA.get("bio") or ""))
-                cur = await user_bot.get_profile_photos("me", limit=1)
-                if cur:
-                    await user_bot(functions.photos.DeletePhotosRequest(id=[cur[0]]))
-                if user_bot.CLONE_DATA.get("photo_bytes"):
-                    bio = user_bot.CLONE_DATA["photo_bytes"]
-                    bio.name = "restore.jpg"
-                    up = await user_bot.upload_file(bio)
-                    await user_bot(functions.photos.UploadProfilePhotoRequest(file=up))
-                # Restore username
-                orig_uname = user_bot.CLONE_DATA.get("username")
-                if orig_uname:
+                await asyncio.sleep(0.6)
+                await user_bot(functions.account.UpdateProfileRequest(
+                    about=(user_bot.CLONE_DATA.get("bio") or "")[:70]
+                ))
+                await asyncio.sleep(0.4)
+
+                # Photo
+                try:
+                    cur = await user_bot.get_profile_photos("me", limit=5)
+                    if cur:
+                        await user_bot(functions.photos.DeletePhotosRequest(id=list(cur)))
+                        await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+                photo_buf = user_bot.CLONE_DATA.get("photo_bytes")
+                if photo_buf:
                     try:
-                        await user_bot(functions.account.UpdateUsernameRequest(username=orig_uname))
-                    except Exception as ue:
-                        print(f"Username restore failed: {ue}")
+                        photo_buf.seek(0)
+                        photo_buf.name = "restore.jpg"
+                        up = await user_bot.upload_file(photo_buf)
+                        await user_bot(functions.photos.UploadProfilePhotoRequest(file=up))
+                        await asyncio.sleep(0.5)
+                    except Exception as pe:
+                        print(f"Photo restore failed: {pe}")
+
+                # Username
+                orig_uname = user_bot.CLONE_DATA.get("username") or ""
+                try:
+                    await user_bot(functions.account.UpdateUsernameRequest(username=orig_uname))
+                except Exception as ue:
+                    print(f"Username restore failed: {ue}")
+
                 user_bot.CLONE_ACTIVE = False
                 user_bot.LAST_CLONE_ID = None
-                user_bot.CLONE_DATA.clear()
+                # keep CLONE_DATA until next successful snapshot so a failed restore can be retried
                 await status_msg(event, "✅ Original restored")
+            except FloodWaitError as fw:
+                await status_msg(event, f"⏳ FloodWait {fw.seconds}s")
+                await asyncio.sleep(fw.seconds + 1)
             except Exception as e:
                 await status_msg(event, f"❌ Restore error: {e}")
 
@@ -18050,6 +18452,249 @@ async def run_user_bot(session_string, chat_id):
             except Exception:
                 pass
 
+        
+        # ─── MENTION RAID / SPAM + STICKER RAID / SPAM ─────────────────
+        @register_cmd("mentionraid")
+        async def cmd_mentionraid(event, args):
+            if not is_admin(event.sender_id):
+                return
+            target = None
+            reply = await event.get_reply_message()
+            if reply and reply.sender_id:
+                try:
+                    target = await user_bot.get_entity(reply.sender_id)
+                except Exception:
+                    pass
+            if not target and args:
+                try:
+                    target = await user_bot.get_entity(args.strip().split()[0])
+                except Exception:
+                    pass
+            if not target:
+                await status_msg(event, "Reply to user or pass @username")
+                return
+            if await is_protected(target.id, "mentionraid"):
+                await status_msg(event, "Target is protected")
+                return
+            user_bot.mention_raid[target.id] = None  # infinite until stop
+            await status_msg(event, f"Mention raid ON → {target.id}")
+
+        @register_cmd("smentionraid")
+        async def cmd_smentionraid(event, args):
+            if not is_admin(event.sender_id):
+                return
+            reply = await event.get_reply_message()
+            tid = None
+            if reply and reply.sender_id:
+                tid = reply.sender_id
+            if args:
+                try:
+                    ent = await user_bot.get_entity(args.strip().split()[0])
+                    tid = ent.id
+                except Exception:
+                    pass
+            if tid and tid in user_bot.mention_raid:
+                del user_bot.mention_raid[tid]
+                await status_msg(event, "Mention raid stopped for target")
+            else:
+                user_bot.mention_raid.clear()
+                await status_msg(event, "All mention raids cleared")
+
+        @register_cmd("mentionspam")
+        async def cmd_mentionspam(event, args):
+            if not is_admin(event.sender_id):
+                return
+            chat = event.chat_id
+            if chat in user_bot.mention_spam_tasks:
+                await status_msg(event, "Already running — .smentionspam")
+                return
+            target_name = (args or "").strip() or "target"
+            reply = await event.get_reply_message()
+            mention = target_name
+            if reply and reply.sender_id:
+                try:
+                    ent = await user_bot.get_entity(reply.sender_id)
+                    mention = f"[{ent.first_name or 'user'}](tg://user?id={ent.id})"
+                    target_name = str(ent.id)
+                except Exception:
+                    pass
+            elif args:
+                try:
+                    ent = await user_bot.get_entity(args.strip().split()[0])
+                    mention = f"[{ent.first_name or 'user'}](tg://user?id={ent.id})"
+                except Exception:
+                    mention = args.strip().split()[0]
+            texts = getattr(user_bot, "deathgod_texts", None) or [
+                "🔥", "💀", "⚡", "Get rekt", "Stay mad", "Cope", "Seethe", "L + ratio"
+            ]
+            async def _loop():
+                try:
+                    while True:
+                        t = random.choice(texts)
+                        await safe_send(chat, f"{mention} {t}")
+                        await asyncio.sleep(getattr(user_bot, "SPRAY_DELAY", 0.35))
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+                finally:
+                    user_bot.mention_spam_tasks.pop(chat, None)
+            task = asyncio.create_task(_loop())
+            user_bot.mention_spam_tasks[chat] = task
+            await status_msg(event, "Mention spam started")
+
+        @register_cmd("smentionspam")
+        async def cmd_smentionspam(event, args):
+            if not is_admin(event.sender_id):
+                return
+            chat = event.chat_id
+            t = user_bot.mention_spam_tasks.pop(chat, None)
+            if t:
+                t.cancel()
+                await status_msg(event, "Mention spam stopped")
+            else:
+                await status_msg(event, "No mention spam in this chat")
+
+        @register_cmd("addstickerpack")
+        async def cmd_addstickerpack(event, args):
+            if not is_admin(event.sender_id):
+                return
+            reply = await event.get_reply_message()
+            pack_name = (args or "").strip() or "default"
+            ids = []
+            if reply and reply.sticker:
+                sid = None
+                try:
+                    sid = reply.file.id if reply.file else None
+                except Exception:
+                    pass
+                if sid:
+                    ids.append(str(sid))
+                # also try document id
+                try:
+                    ids.append(str(reply.media.document.id))
+                except Exception:
+                    pass
+            if not ids:
+                await status_msg(event, "Reply to a sticker (pack name optional)")
+                return
+            # merge with existing
+            existing = await list_sticker_packs(event.sender_id)
+            for p in existing:
+                if p["name"] == pack_name:
+                    ids = list(dict.fromkeys((p.get("ids") or []) + ids))
+                    break
+            await save_sticker_pack(event.sender_id, pack_name, ids)
+            await status_msg(event, f"Saved sticker into pack `{pack_name}` ({len(ids)} ids)")
+
+        @register_cmd("removestickerpack")
+        async def cmd_removestickerpack(event, args):
+            if not is_admin(event.sender_id):
+                return
+            name = (args or "").strip()
+            if not name:
+                await status_msg(event, "Usage: .removestickerpack <name>")
+                return
+            await remove_sticker_pack(event.sender_id, name)
+            await status_msg(event, f"Removed pack `{name}`")
+
+        @register_cmd("liststickerpack")
+        async def cmd_liststickerpack(event, args):
+            if not is_admin(event.sender_id):
+                return
+            packs = await list_sticker_packs(event.sender_id)
+            if not packs:
+                await status_msg(event, "No sticker packs saved")
+                return
+            lines = [f"• `{p['name']}` — {len(p.get('ids') or [])} stickers" for p in packs]
+            await status_msg(event, "📦 Packs:\n" + "\n".join(lines))
+
+        @register_cmd("stickerraid")
+        async def cmd_stickerraid(event, args):
+            if not is_admin(event.sender_id):
+                return
+            target = None
+            reply = await event.get_reply_message()
+            if reply and reply.sender_id:
+                try:
+                    target = await user_bot.get_entity(reply.sender_id)
+                except Exception:
+                    pass
+            if not target and args:
+                try:
+                    target = await user_bot.get_entity(args.strip().split()[0])
+                except Exception:
+                    pass
+            if not target:
+                await status_msg(event, "Reply to user or pass @username")
+                return
+            ids = await get_all_sticker_ids(event.sender_id)
+            if not ids:
+                await status_msg(event, "Add stickers first: .addstickerpack")
+                return
+            user_bot.sticker_raid[target.id] = None
+            user_bot._sticker_ids_cache = ids
+            await status_msg(event, f"Sticker raid ON → {target.id}")
+
+        @register_cmd("sstickerraid")
+        async def cmd_sstickerraid(event, args):
+            if not is_admin(event.sender_id):
+                return
+            user_bot.sticker_raid.clear()
+            await status_msg(event, "Sticker raid cleared")
+
+        @register_cmd("stickerspam")
+        async def cmd_stickerspam(event, args):
+            if not is_admin(event.sender_id):
+                return
+            chat = event.chat_id
+            if chat in user_bot.sticker_spam_tasks:
+                await status_msg(event, "Already running — .sstickerspam")
+                return
+            ids = await get_all_sticker_ids(event.sender_id)
+            if not ids:
+                await status_msg(event, "Add stickers first: .addstickerpack")
+                return
+            async def _loop():
+                try:
+                    while True:
+                        sid = random.choice(ids)
+                        try:
+                            await user_bot.send_file(chat, sid)
+                        except Exception:
+                            try:
+                                await safe_send(chat, "🧩")
+                            except Exception:
+                                pass
+                        await asyncio.sleep(getattr(user_bot, "SPRAY_DELAY", 0.4))
+                except asyncio.CancelledError:
+                    pass
+                finally:
+                    user_bot.sticker_spam_tasks.pop(chat, None)
+            task = asyncio.create_task(_loop())
+            user_bot.sticker_spam_tasks[chat] = task
+            await status_msg(event, "Sticker spam started")
+
+        @register_cmd("sstickerspam")
+        async def cmd_sstickerspam(event, args):
+            if not is_admin(event.sender_id):
+                return
+            chat = event.chat_id
+            t = user_bot.sticker_spam_tasks.pop(chat, None)
+            if t:
+                t.cancel()
+                await status_msg(event, "Sticker spam stopped")
+            else:
+                await status_msg(event, "No sticker spam here")
+
+        @register_cmd("owner")
+        async def cmd_owner_ub(event, args):
+            # userbot-side owner hint
+            if event.sender_id not in MY_OWNER_IDS and event.sender_id not in OWNER_IDS:
+                return
+            await status_msg(event, "Use /owner on the main bot for the full panel.")
+
+
         # ─── AUTO HANDLER ──────────────────────────────────────────────────
         @user_bot.on(events.NewMessage)
         async def auto_handler(event):
@@ -18118,6 +18763,30 @@ async def run_user_bot(session_string, chat_id):
                     except:
                         pass
                     return
+
+            
+            # Mention raid
+            if sender in getattr(user_bot, "mention_raid", {}):
+                if await is_protected(sender, "mentionraid"):
+                    await safe_send(chat, "🚫 Protected from mention raid.", reply_to=event.id)
+                else:
+                    mention = f"[{getattr(event.sender, 'first_name', None) or 'user'}](tg://user?id={sender})"
+                    base = random.choice(getattr(user_bot, "deathgod_texts", None) or ["🔥", "💀", "⚡"])
+                    await safe_send(chat, f"{mention} {base}", reply_to=event.id)
+                return
+
+            # Sticker raid
+            if sender in getattr(user_bot, "sticker_raid", {}):
+                if await is_protected(sender, "stickerraid"):
+                    await safe_send(chat, "🚫 Protected from sticker raid.", reply_to=event.id)
+                else:
+                    ids = getattr(user_bot, "_sticker_ids_cache", None) or []
+                    if ids:
+                        try:
+                            await user_bot.send_file(chat, random.choice(ids), reply_to=event.id)
+                        except Exception:
+                            await safe_send(chat, "🧩", reply_to=event.id)
+                return
 
             if sender in user_bot.reply_users:
                 if await is_protected(sender, "reply"):
@@ -18606,6 +19275,134 @@ async def run_user_bot(session_string, chat_id):
             except Exception:
                 pass
 
+
+
+@MAIN_BOT_CLIENT.on(events.NewMessage)
+async def owner_state_router(event):
+    """Handle multi-step owner panel inputs (video, broadcast, gift, gencode)."""
+    if event.sender_id not in MY_OWNER_IDS:
+        return
+    st = user_states.get(event.sender_id) or {}
+    step = st.get("step")
+    if not step:
+        return
+    if step == "owner_set_start_video":
+        msg = event.message
+        file_id = None
+        if msg.video:
+            file_id = msg.video.id if hasattr(msg.video, "id") else None
+            # Telethon: prefer the message itself as file reference
+            try:
+                await set_app_media("start_video", msg.id)  # store msg id as weak ref — better: download path
+            except Exception:
+                pass
+            # Store by re-uploading is heavy; store media file_id string if available
+            try:
+                # Keep the message id + chat for later forward; also try document id
+                doc = msg.media
+                fid = str(getattr(getattr(doc, "document", None), "id", "") or getattr(msg.video, "id", "") or msg.id)
+                await set_app_media("start_video", fid)
+                # Save full message for respond(file=) by forwarding to saved — use event.respond(file=msg.media)
+                user_states[event.sender_id] = {"step": None, "start_video_media": msg.media}
+                # Persist via a simple file marker is not possible for file_id across restarts without Bot API;
+                # For Telethon userbot main client as bot: use input media from this message.
+                await set_app_media("start_video", "pending")
+                # Better approach: download bytes path not stored. Keep media in memory key:
+                global _START_VIDEO_MEDIA
+                _START_VIDEO_MEDIA = msg.media
+                await event.respond("✅ Start video set for this process. (Re-set after restart.)")
+            except Exception as e:
+                await event.respond(f"Failed: {e}")
+        else:
+            await event.respond("Send a video.")
+        user_states[event.sender_id] = {}
+        return
+    if step == "owner_broadcast":
+        text_msg = event.raw_text or ""
+        user_states[event.sender_id] = {}
+        if not text_msg:
+            await event.respond("Empty message.")
+            return
+        ok = fail = 0
+        for uid in list(broadcast_users):
+            try:
+                await MAIN_BOT_CLIENT.send_message(uid, text_msg)
+                ok += 1
+                await asyncio.sleep(0.05)
+            except Exception:
+                fail += 1
+        await event.respond(f"📢 Broadcast done. OK={ok} FAIL={fail}")
+        return
+    if step == "owner_gift":
+        user_states[event.sender_id] = {}
+        parts = (event.raw_text or "").split()
+        if len(parts) < 3:
+            await event.respond("Format: <user_id> <days> <plan>")
+            return
+        try:
+            uid = int(parts[0]); days = int(parts[1]); plan = parts[2]
+            await add_premium_user(uid, plan, days)
+            await event.respond(f"🎁 Premium gifted to `{uid}` for {days}d ({plan})")
+        except Exception as e:
+            await event.respond(f"Gift failed: {e}")
+        return
+    if step == "owner_gencode":
+        user_states[event.sender_id] = {}
+        parts = (event.raw_text or "").split()
+        if len(parts) < 3:
+            await event.respond("Format: <amount> <max_uses> <expiry_days>")
+            return
+        try:
+            amount = float(parts[0]); max_uses = int(parts[1]); days = int(parts[2])
+            code = await generate_redeem_code(amount, days, max_uses)
+            await event.respond(f"🎟️ Code `{code}`\nAmount ₹{amount} · uses {max_uses} · {days}d")
+        except Exception as e:
+            await event.respond(f"Gen failed: {e}")
+        return
+
+_START_VIDEO_MEDIA = None
+
+@MAIN_BOT_CLIENT.on(events.NewMessage(pattern="/owner"))
+async def owner_cmd(event):
+    if event.sender_id not in MY_OWNER_IDS:
+        return
+    # Reuse owner_panel callback UI
+    class _Fake:
+        pass
+    # simple respond
+    stats = await owner_stats()
+    panel = (
+        "╔════════ OWNER PANEL ════════╗\n"
+        f"║ Users: {stats['registered']:<5} Active: {stats['active_userbots']:<4} ║\n"
+        f"║ Premium: {stats['premium']:<4} Wallet ₹{stats['wallet_total']:<7.0f}║\n"
+        "╚═════════════════════════════╝"
+    )
+    buttons = [
+        [Button.inline("📢 Broadcast", data="own_broadcast")],
+        [Button.inline("🎁 Gift Premium", data="own_gift"), Button.inline("🎟️ Gen Redeem", data="own_gencode")],
+        [Button.inline("🎬 Set Start Video", data="own_setvideo"), Button.inline("💾 Backup DB", data="own_backup")],
+        [Button.inline("📊 Stats", data="own_stats"), Button.inline("❄️ Freeze list", data="own_freezelist")],
+        [Button.inline("👥 Active Userbots", data="own_active")],
+    ]
+    await event.respond(panel, buttons=buttons)
+
+@MAIN_BOT_CLIENT.on(events.NewMessage(pattern="/setstartvideo"))
+async def setstartvideo_cmd(event):
+    if event.sender_id not in MY_OWNER_IDS:
+        return
+    reply = await event.get_reply_message()
+    if not reply or not (reply.video or reply.document):
+        await event.respond("Reply to a video with /setstartvideo")
+        return
+    global _START_VIDEO_MEDIA
+    _START_VIDEO_MEDIA = reply.media
+    try:
+        await set_app_media("start_video", "set")
+    except Exception:
+        pass
+    await event.respond("✅ Start video saved for this process.")
+
+
 # ─── WEB SERVER ──────────────────────────────────────────────────────
 app = Flask(__name__)
 
@@ -18620,7 +19417,11 @@ def run_web():
 
 # ─── MAIN ────────────────────────────────────────────────────────────
 async def main():
-    print("🚀 Main bot starting with Web Server (Waitress)...")
+    if not API_ID or not API_HASH or not BOT_TOKEN:
+        raise SystemExit(
+            f"Set API_ID, API_HASH, BOT_TOKEN (API_ID={API_ID!r}, hash={bool(API_HASH)}, token={bool(BOT_TOKEN)})"
+        )
+    print("Main bot starting with Web Server (Waitress)...")
     await init_db()
     await init_cipher()
     sessions = await load_sessions()
@@ -18630,20 +19431,35 @@ async def main():
             task.set_name(f"userbot_restart_{uid}")
             running_tasks.add(task)
             task.add_done_callback(running_tasks.discard)
-            print(f"✅ Restored session for user {uid}")
+            print(f"Restored session for user {uid}")
         except Exception as e:
-            print(f"❌ Failed to restore {uid}: {e}")
+            print(f"Failed to restore {uid}: {e}")
             await delete_session(uid)
     threading.Thread(target=run_web, daemon=True).start()
     await MAIN_BOT_CLIENT.start(bot_token=BOT_TOKEN)
-    print("✅ Bot is running. Press Ctrl+C to stop.")
+    me = await MAIN_BOT_CLIENT.get_me()
+    print(f"Bot running as @{getattr(me, 'username', None) or me.id}. Ctrl+C to stop.")
     try:
         await MAIN_BOT_CLIENT.run_until_disconnected()
     finally:
         for task in list(running_tasks):
             if not task.done():
                 task.cancel()
-        await MAIN_BOT_CLIENT.disconnect()
+        try:
+            await MAIN_BOT_CLIENT.disconnect()
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Own the client loop — avoids asyncio.run() vs Telethon handler mismatch
+    try:
+        MAIN_BOT_CLIENT.loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("Shutting down...")
+    finally:
+        try:
+            if MAIN_BOT_CLIENT.is_connected():
+                MAIN_BOT_CLIENT.loop.run_until_complete(MAIN_BOT_CLIENT.disconnect())
+        except Exception:
+            pass

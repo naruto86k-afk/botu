@@ -50,11 +50,8 @@ PREMIUM_FEATURES_LINK = os.environ.get("PREMIUM_FEATURES_LINK", "https://t.me/us
 
 # ─── CHANNEL VERIFICATION ───
 REQUIRED_CHANNELS = [
-    #{"id": -1004404975416, "invite": "https://t.me/+j9ndQJG6wdc3ZDE1", "name": "Channel 1"},
-    #{"id": -1004334756214, "invite": "https://t.me/+5DvNxDnfAApjYWNk", "name": "Channel 2"},
-    #{"id": -1004452969098, "invite": "https://t.me/+A1qEdXj8ZUI5ZGM1", "name": "Channel 3"},
-    #{"id": -1004331434090, "invite": "https://t.me/+Wkmu7JUvlrBkZTI1", "name": "Channel 4"},
-
+    {"id": 0, "invite": "https://t.me/userbotinfo_za", "name": "Userbot Info Channel"},
+    {"id": 0, "invite": "https://t.me/+QLDPV4iqXD8xMWUx", "name": "Support Group"},
 ]
 
 USERS_FILE = "broadcast_users.json"
@@ -540,17 +537,33 @@ print("🚀 Main Bot started...")
 # ─── MENU BOX BUILDER ──────────────────────────────────────────────
 
 def fancy_status(kind, detail=""):
-    brand = "⏤͟͞Zʏʀᴇx ͯ Aᴇᴛʜᴇʀ ͯ Uꜱᴇʀʙᴏᴛ"
+    """Status line in monospace mathematical font; auto-deleted by status_msg."""
+    def mono(s):
+        out = []
+        for ch in str(s):
+            o = ord(ch)
+            if 65 <= o <= 90:
+                out.append(chr(0x1D670 + (o - 65)))
+            elif 97 <= o <= 122:
+                out.append(chr(0x1D68A + (o - 97)))
+            elif 48 <= o <= 57:
+                out.append(chr(0x1D7F6 + (o - 48)))
+            else:
+                out.append(ch)
+        return "".join(out)
+    brand = "⏤͟͞Zʏʀᴇx ͯ Aᴇᴛʜᴇʀ"
     nl = chr(10)
+    d = mono(detail)
     if kind == "start":
-        return f"✅ **{brand}**{nl}`▶ {detail}`"
+        return f"⚡ **{brand}**{nl}`▶ {d}`"
     if kind == "stop":
-        return f"🛑 **{brand}**{nl}`■ {detail}`"
+        return f"🛑 **{brand}**{nl}`■ {d}`"
     if kind == "ok":
-        return f"✨ **{brand}**{nl}`✓ {detail}`"
+        return f"✨ **{brand}**{nl}`✓ {d}`"
     if kind == "err":
-        return f"⚠️ **{brand}**{nl}`✗ {detail}`"
-    return f"ℹ️ **{brand}**{nl}`· {detail}`"
+        return f"⚠ **{brand}**{nl}`✗ {d}`"
+    return f"ℹ **{brand}**{nl}`· {d}`"
+
 
 def build_box(title, lines, footer="", back_cmd=None):
     """Premium monospace menu box (code block = dark bg in Telegram)."""
@@ -1123,6 +1136,10 @@ MENU_MAP = {
 # ─── MAIN BOT HANDLERS ────────────────────────────────────────────
 
 async def is_user_in_channel(user_id, channel_data):
+    # invite-only entries with id=0 → always show force-join UI until verify callback
+    if not channel_data.get("id"):
+        return False
+
     try:
         channel = await MAIN_BOT_CLIENT.get_entity(channel_data["id"])
         await MAIN_BOT_CLIENT.get_permissions(channel, user_id)
@@ -1131,11 +1148,11 @@ async def is_user_in_channel(user_id, channel_data):
         return False
 
 def get_join_buttons():
-    buttons = []
-    for idx, ch in enumerate(REQUIRED_CHANNELS, 1):
-        buttons.append([Button.url(text=f"🔗 Join {ch['name']}", url=ch["invite"])])
-    buttons.append([Button.inline(text="✅ I have joined all", data=b"verify_channels")])
-    return buttons
+    return [
+        [Button.url("📢 Channel", "https://t.me/userbotinfo_za")],
+        [Button.url("💬 Support GC", "https://t.me/+QLDPV4iqXD8xMWUx")],
+        [Button.inline("✅ I joined", data=b"verify_channels")],
+    ]
 
 async def shutdown_handler(sig, frame):
     print("🛑 Shutting down...")
@@ -1309,18 +1326,7 @@ async def start_handler(event):
         video_id = await get_app_media("start_video")
     except Exception:
         video_id = None
-    global _START_VIDEO_MEDIA
-    if _START_VIDEO_MEDIA is not None:
-        try:
-            await event.respond(file=_START_VIDEO_MEDIA)
-        except Exception:
-            pass
-    elif video_id:
-        try:
-            await event.respond(file=video_id)
-        except Exception:
-            pass
-
+    
     is_owner = user_id in MY_OWNER_IDS
     is_active = user_id in active_userbots
     bal = 0.0
@@ -1351,14 +1357,14 @@ async def start_handler(event):
         return Button.inline(label, data=data)
 
     buttons = [
-        [_btn("🟢  ʟᴏɢɪɴ / ꜱᴛᴀʀᴛ ᴜꜱᴇʀʙᴏᴛ", "start_login", "success")],
+        [_btn("⚡ ʟᴏɢɪɴ / ꜱᴛᴀʀᴛ", "start_login", "success")],
         [
-            _btn("🔵  ᴘʀᴇᴍɪᴜᴍ ᴘʟᴀɴꜱ", "buy_menu", "primary"),
-            _btn("🟡  ʀᴇᴅᴇᴇᴍ ᴄᴏᴅᴇ", "redeem_prompt"),
+            _btn("💎 ᴘʀᴇᴍɪᴜᴍ", "buy_menu", "primary"),
+            _btn("🎟 ʀᴇᴅᴇᴇᴍ", "redeem_prompt"),
         ],
         [
             _btn("📖  ʜᴇʟᴘ / ꜰᴇᴀᴛᴜʀᴇꜱ", "help_features"),
-            _btn("🆘  ꜱᴜᴘᴘᴏʀᴛ", "support_btn", "danger"),
+            Button.url("🆘  ꜱᴜᴘᴘᴏʀᴛ", "https://t.me/+QLDPV4iqXD8xMWUx"),
         ],
     ]
     if is_owner:
@@ -1366,7 +1372,14 @@ async def start_handler(event):
     if is_active:
         buttons.append([_btn("🔴  ʟᴏɢᴏᴜᴛ ᴜꜱᴇʀʙᴏᴛ", "start_logout", "danger")])
 
-    await safe_reply(event, intro, buttons=buttons)
+    media = globals().get("_START_VIDEO_MEDIA")
+    if media is not None:
+        try:
+            await event.respond(intro, file=media, buttons=buttons)
+        except Exception:
+            await safe_reply(event, intro, buttons=buttons)
+    else:
+        await safe_reply(event, intro, buttons=buttons)
 
     not_joined = []
     for ch in REQUIRED_CHANNELS:
@@ -1811,7 +1824,8 @@ async def callback_handler(event):
             return
         caption = (
             "💰 **Deposit Funds**\n\n"
-            "1. Scan the QR below or use UPI: `{UPI_ID}`\n"
+            "1. Pay via UPI ID only:\n"
+            "`{UPI_ID}`\n\n"
             "2. Send any amount you want to deposit.\n"
             "3. **After payment, send a screenshot** with the **amount paid** in the caption.\n"
             "4. Example caption: `I paid ₹100`\n"
@@ -1823,9 +1837,9 @@ async def callback_handler(event):
         except:
             pass
         try:
-            await event.respond(caption, file=QR_IMAGE_PATH, buttons=buttons)
+            await event.respond(caption, buttons=buttons)
         except Exception as e:
-            await event.respond(caption + "\n\n⚠️ QR image not found. Please contact owner.", buttons=buttons)
+            await event.respond(caption + "\n\n", buttons=buttons)
             print(f"Deposit QR send error: {e}")
         user_states[user_id] = {"step": "waiting_deposit"}
         await event.answer("Deposit instructions sent.")
@@ -2012,18 +2026,15 @@ async def deposit_cmd(event):
     user_id = event.sender_id
     caption = (
         "💰 **Deposit Funds**\n\n"
-        "1. Scan the QR below or use UPI: `{UPI_ID}`\n"
+        "1. Pay via UPI ID only:\n"
+        "`{UPI_ID}`\n\n"
         "2. Send any amount you want to deposit.\n"
         "3. **After payment, send a screenshot** with the **amount paid** in the caption.\n"
         "4. Example caption: `I paid ₹100`\n"
         "5. Our team will verify and credit your wallet."
     ).format(UPI_ID=UPI_ID)
     buttons = [[Button.url("🔗 Premium Features", url=PREMIUM_FEATURES_LINK)]]
-    try:
-        await event.reply(caption, file=QR_IMAGE_PATH, buttons=buttons)
-    except Exception as e:
-        await event.reply(caption + "\n\n⚠️ QR image not found. Please contact owner.", buttons=buttons)
-        print(f"Deposit QR send error: {e}")
+    await event.reply(caption, buttons=buttons)
     user_states[user_id] = {"step": "waiting_deposit"}
 
 @MAIN_BOT_CLIENT.on(events.NewMessage(pattern="/redeem"))
@@ -2491,7 +2502,7 @@ async def run_user_bot(session_string, chat_id):
         user_bot.START_TIME = time.time()
         # ─── AUTO-DELETE CONTROL ───
         user_bot.AUTO_DELETE_STATUS_MSGS = True
-        user_bot.AUTO_DELETE_DELAY = 3
+        user_bot.AUTO_DELETE_DELAY = 1
         user_bot.auto_delete_tasks = set()
         user_bot.CMD_RESPONSE_CACHE = set()  # Track command response msg IDs
         user_bot.react_targets = {}
@@ -14026,26 +14037,57 @@ async def run_user_bot(session_string, chat_id):
         async def menu_handler(event):
             cmd = event.pattern_match.group(1).strip().lower()
             text = MENU_MAP.get(cmd)
-            if text is not None:
-                try:
-                    msg = await event.edit(text or "⚠️ This menu is empty.")
-                except MessageNotModifiedError:
-                    msg = event
-                except:
-                    msg = await event.reply(text or "⚠️ This menu is empty.")
-                # Menu 5 sec tak dikhe
-                if msg:
-                    async def del_menu():
-                        try:
-                            await asyncio.sleep(30)
-                            await msg.delete()
-                        except:
-                            pass
-                    task = asyncio.create_task(del_menu())
-                    user_bot.auto_delete_tasks.add(task)
-                    task.add_done_callback(user_bot.auto_delete_tasks.discard)
-            else:
+            if text is None:
                 await status_msg(event, f"❌ Menu '{cmd}' not found.")
+                return
+            # Show user banner (if set) as media + caption menu when possible
+            banner = getattr(user_bot, "menu_banner_msg", None)
+            sent = None
+            if banner and cmd in ("menu", "menu1", "menu2", "menu3"):
+                try:
+                    bchat, bmsg = banner
+                    # forward/copy banner into this chat with menu as caption when photo/video allows
+                    try:
+                        sent = await user_bot.forward_messages(event.chat_id, bmsg, bchat)
+                    except Exception:
+                        try:
+                            msg_obj = await user_bot.get_messages(bchat, ids=bmsg)
+                            if msg_obj and msg_obj.media:
+                                sent = await user_bot.send_file(
+                                    event.chat_id,
+                                    msg_obj.media,
+                                    caption=(text or "")[:1024],
+                                )
+                        except Exception:
+                            sent = None
+                except Exception:
+                    sent = None
+            if sent is None:
+                try:
+                    sent = await event.edit(text or "⚠️ This menu is empty.")
+                except MessageNotModifiedError:
+                    sent = event
+                except Exception:
+                    try:
+                        sent = await event.reply(text or "⚠️ This menu is empty.")
+                    except Exception:
+                        sent = None
+            elif text and not getattr(sent, "message", None):
+                # forwarded without caption — send text under banner
+                try:
+                    await event.reply(text)
+                except Exception:
+                    pass
+            if sent:
+                async def del_menu():
+                    try:
+                        await asyncio.sleep(30)
+                        await sent.delete()
+                    except Exception:
+                        pass
+                task = asyncio.create_task(del_menu())
+                user_bot.auto_delete_tasks.add(task)
+                task.add_done_callback(user_bot.auto_delete_tasks.discard)
 
         # ─── ADD .cmds COMMAND ─────────────────────────────────────────────
         @user_bot.on(events.NewMessage(pattern=r'\.cmds', outgoing=True))
@@ -16030,142 +16072,182 @@ async def run_user_bot(session_string, chat_id):
 
         @register_cmd("music")
         async def cmd_music(event, arg):
-            if not arg:
+            """Search by song name / lyrics line → playable MP3 (kept in chat)."""
+            if not arg or not str(arg).strip():
+                await status_msg(event, fancy_status("info", "ᴜꜱᴀɢᴇ · .music <song name or line>"))
                 return
-            query = arg.strip()
-            frames = ["▰▱▱▱▱", "▰▰▱▱▱", "▰▰▰▱▱", "▰▰▰▰▱", "▰▰▰▰▰"]
-            status = await safe_edit(event, f"🎵 Processing `{query}`\n\n{frames[0]}")
-            stop_loader = asyncio.Event()
-            async def loader():
-                i = 0
-                while not stop_loader.is_set():
-                    try:
-                        await status.edit(f"🎵 Processing `{query}`\n\n{frames[i % 5]}")
-                    except:
-                        pass
-                    i += 1
-                    await asyncio.sleep(1)
-            loader_task = asyncio.create_task(loader())
-            async def voice_music():
+            query = str(arg).strip()
+            try:
+                status = await safe_edit(event, f"🎵 `searching` · `{query[:60]}`")
+            except Exception:
+                status = None
+
+            async def job():
+                path = None
                 try:
                     loop = asyncio.get_running_loop()
-                    ydl_opts = {
-                        "format": "bestaudio[abr<=128]/bestaudio/best",
-                        "outtmpl": "vn_%(id)s.%(ext)s",
-                        "quiet": True,
-                        "default_search": "ytsearch1",
-                        "noplaylist": True,
-                        "retries": 5,
-                        "extractor_args": {"youtube": {"player_client": ["tv_embedded", "android", "mweb"]}},
-                        "http_headers": {"User-Agent": "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36"}
-                    }
-                    def dl():
+
+                    def dl(q, search_prefix="ytsearch1"):
+                        ydl_opts = {
+                            "format": "bestaudio/best",
+                            "outtmpl": "music_%(id)s.%(ext)s",
+                            "quiet": True,
+                            "no_warnings": True,
+                            "default_search": search_prefix,
+                            "noplaylist": True,
+                            "retries": 3,
+                            "ignoreerrors": True,
+                            "postprocessors": [{
+                                "key": "FFmpegExtractAudio",
+                                "preferredcodec": "mp3",
+                                "preferredquality": "192",
+                            }],
+                            "http_headers": {
+                                "User-Agent": (
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    "Chrome/120.0.0.0 Safari/537.36"
+                                )
+                            },
+                        }
                         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            return ydl.extract_info(query, download=True)
-                    info = await loop.run_in_executor(None, dl)
-                    if "entries" in info:
-                        info = info["entries"][0]
-                    vid = info.get("id")
-                    title = info.get("title") or query
-                    dur = info.get("duration") or 0
-                    mins, secs = divmod(dur, 60)
-                    dtext = f"{mins}:{secs:02d}"
-                    files = glob.glob(f"vn_{vid}.*")
-                    if not files:
-                        stop_loader.set(); loader_task.cancel()
-                        return await safe_edit(event, "❌ Download fail")
-                    src = files[0]
-                    clean = re.sub(r"[^\w\s-]", "", title).strip()[:40]
-                    new = f"{clean}.ogg"
+                            # If user pasted a URL, use it raw; else search
+                            target = q if re.match(r"https?://", q) else q
+                            return ydl.extract_info(target, download=True)
+
+                    info = await loop.run_in_executor(None, lambda: dl(query, "ytsearch1"))
+
+                    # Normalize entries — never index empty list
+                    if not info:
+                        info = await loop.run_in_executor(None, lambda: dl(query, "ytsearch3"))
+                    if not info:
+                        if status:
+                            await safe_edit(event, "❌ no results")
+                        return
+
+                    if isinstance(info, dict) and "entries" in info:
+                        entries = [e for e in (info.get("entries") or []) if e]
+                        if not entries:
+                            # retry broader search
+                            info2 = await loop.run_in_executor(None, lambda: dl(query, "ytsearch5"))
+                            if isinstance(info2, dict) and "entries" in info2:
+                                entries = [e for e in (info2.get("entries") or []) if e]
+                            elif isinstance(info2, dict) and info2.get("id"):
+                                entries = [info2]
+                            info = entries[0] if entries else None
+                        else:
+                            info = entries[0]
+
+                    if not info or not isinstance(info, dict):
+                        if status:
+                            await safe_edit(event, "❌ no playable result")
+                        return
+
+                    vid = str(info.get("id") or "")
+                    title = (info.get("title") or query)[:80]
+                    artist = (info.get("uploader") or info.get("channel") or "Unknown")[:60]
+                    dur = int(info.get("duration") or 0)
+
+                    # Locate downloaded / converted file
+                    candidates = []
+                    if vid:
+                        candidates = (
+                            glob.glob(f"music_{vid}*.mp3")
+                            or glob.glob(f"music_{vid}.*")
+                        )
+                    if not candidates:
+                        # newest music_* file as last resort
+                        candidates = sorted(
+                            glob.glob("music_*.mp3") + glob.glob("music_*.m4a") + glob.glob("music_*.webm"),
+                            key=os.path.getmtime,
+                            reverse=True,
+                        )
+                    if not candidates:
+                        if status:
+                            await safe_edit(event, "❌ download failed (no file)")
+                        return
+
+                    path = candidates[0]
+                    # If not mp3 yet, try ffmpeg quick convert
+                    if not path.lower().endswith(".mp3"):
+                        mp3_path = os.path.splitext(path)[0] + ".mp3"
+                        try:
+                            proc = await asyncio.create_subprocess_exec(
+                                "ffmpeg", "-y", "-i", path, "-vn", "-acodec", "libmp3lame",
+                                "-q:a", "4", mp3_path,
+                                stdout=asyncio.subprocess.DEVNULL,
+                                stderr=asyncio.subprocess.DEVNULL,
+                            )
+                            await proc.wait()
+                            if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0:
+                                try:
+                                    os.remove(path)
+                                except Exception:
+                                    pass
+                                path = mp3_path
+                        except Exception:
+                            pass
+
+                    safe_name = re.sub(r"[^\w\s\-\.]", "", title).strip()[:50] or "track"
+                    final = f"{safe_name}.mp3"
                     try:
-                        os.rename(src, new)
-                    except:
-                        new = src
-                    stop_loader.set(); loader_task.cancel()
-                    await safe_edit(event, f"🎙️ Sending `{clean}`")
-                    await user_bot.send_file(event.chat_id, new, voice_note=True, caption=f"🎵 Music\n━━━━━━━━━━━━━━━\n📀 `{clean}`\n⏱ {dtext}")
-                    try:
-                        os.remove(new)
-                    except:
-                        pass
+                        if path != final:
+                            if os.path.exists(final):
+                                os.remove(final)
+                            os.rename(path, final)
+                            path = final
+                    except Exception:
+                        final = path
+
+                    if status:
+                        try:
+                            await status.delete()
+                        except Exception:
+                            pass
+
+                    await user_bot.send_file(
+                        event.chat_id,
+                        path,
+                        caption=f"🎵 **{title}**\n🎤 `{artist}`\n⏱ `{dur // 60}:{dur % 60:02d}`",
+                        attributes=[
+                            types.DocumentAttributeAudio(
+                                duration=dur,
+                                title=title,
+                                performer=artist,
+                            )
+                        ],
+                        supports_streaming=True,
+                    )
                 except Exception as e:
-                    stop_loader.set(); loader_task.cancel()
-                    await safe_edit(event, f"❌ Music error: {e}")
-            asyncio.create_task(voice_music())
+                    err = str(e)[:150]
+                    try:
+                        await safe_edit(event, f"❌ music error · `{err}`")
+                    except Exception:
+                        try:
+                            await event.reply(f"❌ music error · `{err}`")
+                        except Exception:
+                            pass
+                finally:
+                    for pattern in ("music_*.mp3", "music_*.webm", "music_*.m4a", "music_*.opus", "music_*.ogg"):
+                        for leftover in glob.glob(pattern):
+                            try:
+                                os.remove(leftover)
+                            except Exception:
+                                pass
+                    if path:
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+
+            asyncio.create_task(job())
 
         @register_cmd("dmusic")
         async def cmd_dmusic(event, arg):
-            if not arg:
-                return
-            query = arg.strip()
-            frames = ["▰▱▱▱▱", "▰▰▱▱▱", "▰▰▰▱▱", "▰▰▰▰▱", "▰▰▰▰▰"]
-            status = await safe_edit(event, f"📥 Downloading `{query}`\n\n{frames[0]}")
-            stop_loader = asyncio.Event()
-            async def loader():
-                i = 0
-                while not stop_loader.is_set():
-                    try:
-                        await status.edit(f"📥 Downloading `{query}`\n\n{frames[i % 5]}")
-                    except:
-                        pass
-                    i += 1
-                    await asyncio.sleep(1)
-            loader_task = asyncio.create_task(loader())
-            async def download_music():
-                try:
-                    loop = asyncio.get_running_loop()
-                    ydl_opts = {
-                        "format": "bestaudio/best",
-                        "outtmpl": "dm_%(id)s.%(ext)s",
-                        "quiet": True,
-                        "default_search": "ytsearch1",
-                        "noplaylist": True,
-                        "retries": 5,
-                        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"}],
-                        "extractor_args": {"youtube": {"player_client": ["tv_embedded", "android", "mweb"]}},
-                        "http_headers": {"User-Agent": "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36"}
-                    }
-                    def dl():
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            return ydl.extract_info(query, download=True)
-                    info = await loop.run_in_executor(None, dl)
-                    if "entries" in info:
-                        info = info["entries"][0]
-                    vid = info.get("id")
-                    title = info.get("title") or query
-                    dur = info.get("duration") or 0
-                    artist = info.get("uploader") or "Unknown"
-                    mins, secs = divmod(dur, 60)
-                    dtext = f"{mins}:{secs:02d}"
-                    files = glob.glob(f"dm_{vid}*.mp3")
-                    if not files:
-                        files = glob.glob(f"dm_{vid}.*")
-                    if not files:
-                        stop_loader.set(); loader_task.cancel()
-                        return await safe_edit(event, "❌ Download fail")
-                    src = files[0]
-                    clean = re.sub(r"[^\w\s-]", "", title).strip()[:50]
-                    ext = os.path.splitext(src)[1]
-                    new = f"{clean}{ext}"
-                    try:
-                        os.rename(src, new)
-                    except:
-                        new = src
-                    stop_loader.set(); loader_task.cancel()
-                    await safe_edit(event, f"📤 Sending `{clean}`")
-                    await user_bot.send_file(event.chat_id, new,
-                        caption=f"📥 Music Download\n━━━━━━━━━━━━━━━\n🎵 `{clean}`\n🎤 `{artist}`\n⏱ {dtext}\n🎧 320 kbps MP3",
-                        attributes=[types.DocumentAttributeAudio(duration=dur, title=title, performer=artist)])
-                    try:
-                        os.remove(new)
-                    except:
-                        pass
-                except Exception as e:
-                    stop_loader.set(); loader_task.cancel()
-                    await safe_edit(event, f"❌ DMusic error: {e}")
-            asyncio.create_task(download_music())
+            """Same as .music — search → MP3 player, kept in chat."""
+            await cmd_music(event, arg)
 
-        # ─── FUN METERS ──────────────────────────────────────────────────────────
+                # ─── FUN METERS ──────────────────────────────────────────────────────────
         def get_funny_line(meter_type, percent):
             return "✨ You're amazing! ✨"
 

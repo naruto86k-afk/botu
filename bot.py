@@ -2437,6 +2437,7 @@ async def start_handler(event):
             _btn("📖  ʜᴇʟᴘ / ꜰᴇᴀᴛᴜʀᴇꜱ", "help_features"),
             Button.url("🆘  ꜱᴜᴘᴘᴏʀᴛ", "https://t.me/+QLDPV4iqXD8xMWUx"),
         ],
+        [_btn("🔥 GOD FEATURE", "start_god_menu", "primary")],
     ]
     if is_owner:
         buttons.append([_btn("🛠  ᴏᴡɴᴇʀ ᴘᴀɴᴇʟ", "owner_panel", "primary")])
@@ -2743,6 +2744,23 @@ async def callback_handler(event):
             "• Wallet + redeem codes\n"
             "Type `.menu` inside your userbot after login."
         )
+        return
+    if data == "start_god_menu":
+        await event.answer()
+        try:
+            body = MENU_15
+        except NameError:
+            body = "🔥 **GOD FEATURE**\nUse `.menu15` after login in your userbot."
+        try:
+            await event.respond(body)
+        except Exception:
+            await event.respond(
+                "🔥 **GOD FEATURE**\n"
+                "After login, open your userbot and use:\n"
+                "• `.menu15` — full GOD command list\n"
+                "• `.god` — panel with buttons\n"
+                "• `.addacc` / `.poolon` / `.massdm` / `.play` …"
+            )
         return
     if data == "support_btn":
         await event.answer()

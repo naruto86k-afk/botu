@@ -1604,7 +1604,8 @@ MENU_MAIN = build_box("MAIN MENU", [
     "",
     "▸ .cmds    Full command list",
     "▸ .ping    Latency check",
-    "▸ .god     GOD Feature (pool)",
+    "▸ .menu15  GOD Feature",
+    "▸ .god     GOD panel (buttons)",
 ], footer="prefix · .  |  stop · .stopall")
 
 MENU_1 = build_box("👑 ADMIN & GROUP", [
@@ -2107,6 +2108,41 @@ MENU_14 = build_box("🔥 PREMIUM SPAM", [
     "",
 ], back_cmd=BACK_TO_MAIN)
 
+MENU_15 = build_box("🔥 GOD FEATURE", [
+    "",
+    "  ◆  ACCOUNT POOL  ◆",
+    "",
+    "  ▸ .addacc <session> [label]  → Add secondary",
+    "  ▸ .delacc <index|label>      → Remove secondary",
+    "  ▸ .listacc                   → All secondaries",
+    "  ▸ .liveacc                   → Live only",
+    "  ▸ .expiredacc                → Failed sessions",
+    "",
+    "  ◆  POOL CONTROL  ◆",
+    "",
+    "  ▸ .poolon   → Activate mirror pool",
+    "  ▸ .pooloff  → Deactivate pool",
+    "  ▸ .god      → Panel with buttons",
+    "",
+    "  ◆  MASS ACTIONS  ◆",
+    "",
+    "  ▸ .massdm <user> <msg>       → DM from all accounts",
+    "  ▸ .joingc <invite_link>      → Join GC (all accounts)",
+    "  ▸ .massvcjoin                → Join live voice chat",
+    "",
+    "  ◆  VOICE CLIPS  ◆",
+    "",
+    "  ▸ .vcsave <name>   → Save (reply to voice)",
+    "  ▸ .vclist          → List clips",
+    "  ▸ .vcdel <name>    → Delete clip",
+    "  ▸ .play <name>     → Play on all accounts",
+    "  ▸ .stopplay        → Stop / leave VC",
+    "",
+    "  Pool ON → secondaries mirror MAIN raids",
+    "",
+], back_cmd=BACK_TO_MAIN)
+
+
 MENU_MAP = {
     "menu":     MENU_MAIN,
     "menu1":    MENU_1,
@@ -2124,7 +2160,9 @@ MENU_MAP = {
     "menu12":   MENU_12,
     "menu13":   MENU_13,
     "menu14":   MENU_14,
+    "menu15":   MENU_15,
 }
+
 
 # ─── MAIN BOT HANDLERS ────────────────────────────────────────────
 

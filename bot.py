@@ -11,8 +11,9 @@ import re
 import glob
 import signal
 import sys
-from typing import Dict, Set, Optional
+from typing import Dict, Set, Optional, List, Any
 from io import BytesIO
+from pathlib import Path
 import requests
 import qrcode
 from gtts import gTTS
@@ -34,6 +35,13 @@ from telethon.tl.functions.channels import EditBannedRequest
 from telethon.tl.types import ChatBannedRights
 from telethon.tl.functions.contacts import BlockRequest, UnblockRequest   # ✅ ADDED
 
+from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.functions.phone import JoinGroupCallRequest, LeaveGroupCallRequest
+from telethon.tl.types import DataJSON
+from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.tl.functions.channels import JoinChannelRequest
+
+
 # ─── CONFIGURATION ───
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
@@ -50,8 +58,8 @@ PREMIUM_FEATURES_LINK = os.environ.get("PREMIUM_FEATURES_LINK", "https://t.me/us
 
 # ─── CHANNEL VERIFICATION ───
 REQUIRED_CHANNELS = [
-    {"id": 0, "invite": "https://t.me/userbotinfo_za", "name": "Userbot Info Channel"},
-    {"id": 0, "invite": "https://t.me/+QLDPV4iqXD8xMWUx", "name": "Support Group"},
+    {"id": -1004452969098, "invite": "https://t.me/userbotinfo_za", "name": "Userbot Info Channel"},
+    {"id": -1004390293211, "invite": "https://t.me/+QLDPV4iqXD8xMWUx", "name": "Support Group"},
 ]
 
 USERS_FILE = "broadcast_users.json"
@@ -222,6 +230,16 @@ async def init_db():
             )
         """)
 
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS redeem_code_uses (
+                code TEXT NOT NULL,
+                user_id BIGINT NOT NULL,
+                redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (code, user_id)
+            )
+        """)
+
 # ─── ENCRYPTION ──────────────────────────────────────────────────────
 async def get_encryption_key():
     async with db_pool.acquire() as conn:
@@ -249,6 +267,974 @@ def decrypt_session(data: str):
     if cipher is None:
         raise RuntimeError("Cipher not initialized")
     return cipher.decrypt(data.encode()).decode()
+
+
+# ─── GOD FEATURE (secondary account pool + mass VC) ─────────────────
+try:
+    from pytgcalls import PyTgCalls
+    from pytgcalls.types import MediaStream
+    HAS_PYTGCALLS = True
+except Exception:
+    HAS_PYTGCALLS = False
+    PyTgCalls = None
+    MediaStream = None
+
+CLIP_DIR = Path(os.environ.get("GOD_VC_DIR", "/tmp/god_vc_clips"))
+CLIP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+async def _fw_sleep(e: FloodWaitError):
+    await asyncio.sleep(max(int(e.seconds), 1) + 1)
+
+
+async def _safe_send(client: TelegramClient, peer, text: str, **kw):
+    for _ in range(4):
+        try:
+            return await client.send_message(peer, text, **kw)
+        except FloodWaitError as e:
+            await _fw_sleep(e)
+        except Exception:
+            await asyncio.sleep(0.4)
+    return None
+
+
+async def _safe_send_file(client: TelegramClient, peer, path: str, **kw):
+    for _ in range(4):
+        try:
+            return await client.send_file(peer, path, **kw)
+        except FloodWaitError as e:
+            await _fw_sleep(e)
+        except Exception:
+            await asyncio.sleep(0.5)
+    return None
+
+
+async def _resolve_group_call(client: TelegramClient, chat_id: int):
+    """Return (call | None, full_chat | None) for a live voice chat."""
+    try:
+        entity = await client.get_entity(chat_id)
+        if not getattr(entity, "megagroup", False) and not getattr(entity, "broadcast", False):
+            try:
+                full = await client(functions.messages.GetFullChatRequest(chat_id=entity.id))
+                call = getattr(full.full_chat, "call", None)
+                return call, full.full_chat
+            except Exception:
+                return None, None
+        full = await client(GetFullChannelRequest(channel=entity))
+        call = getattr(full.full_chat, "call", None)
+        return call, full.full_chat
+    except Exception:
+        return None, None
+
+
+async def _join_group_call(client: TelegramClient, chat_id: int, muted: bool = True) -> str:
+    """Join the active group voice chat roster. Returns status string."""
+    call, _ = await _resolve_group_call(client, chat_id)
+    if call is None:
+        return "no_call"
+    try:
+        me = await client.get_me()
+        await client(JoinGroupCallRequest(
+            call=call,
+            join_as=me,
+            params=DataJSON(data="{}"),
+            muted=muted,
+            video_stopped=True,
+        ))
+        return "joined"
+    except RPCError as e:
+        msg = str(e).lower()
+        if "already" in msg:
+            return "already"
+        if "not enough rights" in msg or "admin" in msg:
+            return "no_rights"
+        return f"err:{e.__class__.__name__}"
+    except Exception as e:
+        return f"err:{e.__class__.__name__}"
+
+
+async def _leave_group_call(client: TelegramClient, chat_id: int) -> None:
+    call, _ = await _resolve_group_call(client, chat_id)
+    if call is None:
+        return
+    try:
+        await client(LeaveGroupCallRequest(call=call))
+    except Exception:
+        pass
+
+
+class SecondarySlot:
+    __slots__ = (
+        "label", "session_str", "client", "status", "task",
+        "owner_id", "index", "pytg",
+    )
+
+    def __init__(self, owner_id: int, label: str, session_str: str, index: int):
+        self.owner_id = owner_id
+        self.label = label
+        self.session_str = session_str
+        self.client: Optional[TelegramClient] = None
+        self.status = "sleep"
+        self.task: Optional[asyncio.Task] = None
+        self.index = index
+        self.pytg = None
+
+
+class GodPool:
+    """Per-owner secondary client pool. Pure senders – no command handlers."""
+
+    def __init__(self, db_pool, cipher, api_id: int, api_hash: str):
+        self.db = db_pool
+        self.cipher = cipher
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self.pools: Dict[int, List[SecondarySlot]] = {}
+        self.active: Dict[int, bool] = {}
+        self.vc_library: Dict[int, Dict[str, str]] = {}
+        self.mains: Dict[int, Any] = {}
+        self.main_pytg: Dict[int, Any] = {}
+        self._lock = asyncio.Lock()
+
+    async def init_tables(self):
+        async with self.db.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS secondary_sessions (
+                    owner_id BIGINT NOT NULL,
+                    slot_index INTEGER NOT NULL,
+                    label TEXT NOT NULL,
+                    session_encrypted TEXT NOT NULL,
+                    status TEXT DEFAULT 'sleep',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (owner_id, slot_index)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS secondary_pool_state (
+                    owner_id BIGINT PRIMARY KEY,
+                    pool_active BOOLEAN DEFAULT FALSE
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS secondary_vc_clips (
+                    owner_id BIGINT NOT NULL,
+                    name TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (owner_id, name)
+                )
+            """)
+
+    def encrypt(self, s: str) -> str:
+        return self.cipher.encrypt(s.encode()).decode()
+
+    def decrypt(self, s: str) -> str:
+        return self.cipher.decrypt(s.encode()).decode()
+
+    def attach(self, user_bot, owner_id: int):
+        self.mains[owner_id] = user_bot
+        user_bot.god_pool = self
+        user_bot.god_owner_id = owner_id
+        asyncio.create_task(self._restore_owner(owner_id))
+        if HAS_PYTGCALLS:
+            asyncio.create_task(self._boot_main_pytg(owner_id, user_bot))
+
+    async def _boot_main_pytg(self, owner_id: int, user_bot):
+        try:
+            pytg = PyTgCalls(user_bot)
+            await pytg.start()
+            self.main_pytg[owner_id] = pytg
+        except Exception as e:
+            print(f"[GOD] MAIN pytgcalls start failed: {e}")
+
+    async def _restore_owner(self, owner_id: int):
+        async with self.db.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT slot_index, label, session_encrypted, status "
+                "FROM secondary_sessions WHERE owner_id=$1 ORDER BY slot_index",
+                owner_id,
+            )
+            state = await conn.fetchrow(
+                "SELECT pool_active FROM secondary_pool_state WHERE owner_id=$1", owner_id
+            )
+            clips = await conn.fetch(
+                "SELECT name, file_path FROM secondary_vc_clips WHERE owner_id=$1", owner_id
+            )
+        self.active[owner_id] = bool(state["pool_active"]) if state else False
+        self.vc_library[owner_id] = {
+            r["name"]: r["file_path"]
+            for r in clips
+            if r["file_path"] and Path(r["file_path"]).is_file()
+        }
+        slots: List[SecondarySlot] = []
+        for r in rows:
+            try:
+                sess = self.decrypt(r["session_encrypted"])
+            except Exception:
+                continue
+            slot = SecondarySlot(owner_id, r["label"], sess, r["slot_index"])
+            slot.status = "expired" if r["status"] == "expired" else "sleep"
+            slots.append(slot)
+        self.pools[owner_id] = slots
+        for slot in slots:
+            if slot.status != "expired":
+                asyncio.create_task(self._connect_slot(slot))
+
+    async def teardown_owner(self, owner_id: int):
+        slots = self.pools.pop(owner_id, [])
+        self.active.pop(owner_id, None)
+        self.mains.pop(owner_id, None)
+        self.vc_library.pop(owner_id, None)
+        pytg = self.main_pytg.pop(owner_id, None)
+        if pytg:
+            try:
+                await pytg.stop()
+            except Exception:
+                pass
+        for slot in slots:
+            await self._disconnect_slot(slot)
+        async with self.db.acquire() as conn:
+            await conn.execute("DELETE FROM secondary_sessions WHERE owner_id=$1", owner_id)
+            await conn.execute("DELETE FROM secondary_pool_state WHERE owner_id=$1", owner_id)
+            await conn.execute("DELETE FROM secondary_vc_clips WHERE owner_id=$1", owner_id)
+        for p in CLIP_DIR.glob(f"{owner_id}_*"):
+            try:
+                p.unlink()
+            except Exception:
+                pass
+
+    async def _connect_slot(self, slot: SecondarySlot):
+        if slot.client and slot.client.is_connected():
+            slot.status = "live"
+            return
+        slot.status = "connecting"
+        try:
+            client = TelegramClient(
+                StringSession(slot.session_str),
+                self.api_id,
+                self.api_hash,
+                connection_retries=5,
+                auto_reconnect=True,
+                loop=asyncio.get_running_loop(),
+            )
+            await client.connect()
+            if not await client.is_user_authorized():
+                slot.status = "expired"
+                await self._mark_db_status(slot, "expired")
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                return
+            me = await client.get_me()
+            if not slot.label or slot.label.startswith("acc"):
+                slot.label = (me.username or me.first_name or f"acc{slot.index}")[:32]
+            slot.client = client
+            slot.status = "live"
+            await self._mark_db_status(slot, "live")
+
+            if HAS_PYTGCALLS:
+                try:
+                    pytg = PyTgCalls(client)
+                    await pytg.start()
+                    slot.pytg = pytg
+                except Exception as e:
+                    print(f"[GOD] secondary pytgcalls fail {slot.label}: {e}")
+
+            async def _keepalive():
+                try:
+                    await client.run_until_disconnected()
+                except Exception:
+                    pass
+                finally:
+                    slot.status = "expired"
+                    slot.client = None
+                    if slot.pytg:
+                        try:
+                            await slot.pytg.stop()
+                        except Exception:
+                            pass
+                        slot.pytg = None
+                    await self._mark_db_status(slot, "expired")
+            slot.task = asyncio.create_task(_keepalive())
+        except (UnauthorizedError, AuthKeyDuplicatedError, ValueError):
+            slot.status = "expired"
+            await self._mark_db_status(slot, "expired")
+        except Exception as e:
+            slot.status = "expired"
+            await self._mark_db_status(slot, "expired")
+            print(f"[GOD] connect fail {slot.label}: {e}")
+
+    async def _disconnect_slot(self, slot: SecondarySlot):
+        if slot.pytg:
+            try:
+                await slot.pytg.stop()
+            except Exception:
+                pass
+            slot.pytg = None
+        if slot.task and not slot.task.done():
+            slot.task.cancel()
+        if slot.client:
+            try:
+                await slot.client.disconnect()
+            except Exception:
+                pass
+        slot.client = None
+        slot.status = "sleep"
+
+    async def _mark_db_status(self, slot: SecondarySlot, status: str):
+        async with self.db.acquire() as conn:
+            await conn.execute(
+                "UPDATE secondary_sessions SET status=$1 WHERE owner_id=$2 AND slot_index=$3",
+                status, slot.owner_id, slot.index,
+            )
+
+    def live_clients(self, owner_id: int) -> List[TelegramClient]:
+        if not self.active.get(owner_id):
+            return []
+        out = []
+        for s in self.pools.get(owner_id, []):
+            if s.status == "live" and s.client and s.client.is_connected():
+                out.append(s.client)
+        return out
+
+    def live_slots(self, owner_id: int) -> List[SecondarySlot]:
+        if not self.active.get(owner_id):
+            return []
+        return [
+            s for s in self.pools.get(owner_id, [])
+            if s.status == "live" and s.client and s.client.is_connected()
+        ]
+
+    def all_slots(self, owner_id: int) -> List[SecondarySlot]:
+        return list(self.pools.get(owner_id, []))
+
+    async def add_acc(self, owner_id: int, session_str: str, label: str = "") -> str:
+        session_str = session_str.strip()
+        if len(session_str) < 20:
+            return "❌ Invalid session string"
+        test = TelegramClient(
+            StringSession(session_str), self.api_id, self.api_hash,
+            loop=asyncio.get_running_loop(),
+        )
+        try:
+            await test.connect()
+            if not await test.is_user_authorized():
+                await test.disconnect()
+                return "❌ Session not authorized"
+            me = await test.get_me()
+            auto_label = label or (me.username or me.first_name or "acc")[:32]
+            await test.disconnect()
+        except Exception as e:
+            try:
+                await test.disconnect()
+            except Exception:
+                pass
+            return f"❌ Session reject: {e}"
+
+        async with self._lock:
+            slots = self.pools.setdefault(owner_id, [])
+            idx = max([s.index for s in slots], default=-1) + 1
+            enc = self.encrypt(session_str)
+            async with self.db.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO secondary_sessions
+                        (owner_id, slot_index, label, session_encrypted, status)
+                    VALUES ($1,$2,$3,$4,'sleep')
+                    ON CONFLICT (owner_id, slot_index) DO UPDATE
+                    SET label=$3, session_encrypted=$4, status='sleep'
+                    """,
+                    owner_id, idx, auto_label, enc,
+                )
+            slot = SecondarySlot(owner_id, auto_label, session_str, idx)
+            slots.append(slot)
+        asyncio.create_task(self._connect_slot(slot))
+        return f"✅ Added `#{idx}` · {auto_label} (connecting…)"
+
+    async def del_acc(self, owner_id: int, key: str) -> str:
+        slots = self.pools.get(owner_id, [])
+        target = None
+        key = key.strip()
+        if key.isdigit():
+            i = int(key)
+            for s in slots:
+                if s.index == i:
+                    target = s
+                    break
+        else:
+            for s in slots:
+                if s.label.lower() == key.lower():
+                    target = s
+                    break
+        if not target:
+            return "❌ Slot not found"
+        await self._disconnect_slot(target)
+        async with self.db.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM secondary_sessions WHERE owner_id=$1 AND slot_index=$2",
+                owner_id, target.index,
+            )
+        slots.remove(target)
+        return f"🗑 Removed `#{target.index}` · {target.label}"
+
+    def list_text(self, owner_id: int, only_live: bool = False) -> str:
+        slots = self.pools.get(owner_id, [])
+        if not slots:
+            return "📭 No secondary accounts."
+        lines = []
+        for s in slots:
+            if only_live and s.status != "live":
+                continue
+            flag = {"live": "🟢", "sleep": "⚪", "expired": "🔴", "connecting": "🟡"}.get(s.status, "⚪")
+            lines.append(f"{flag} `#{s.index}` {s.label} · {s.status}")
+        pool = "ON" if self.active.get(owner_id) else "OFF"
+        head = f"**Pool · {pool}** · {len(slots)} slots\n"
+        return head + ("\n".join(lines) if lines else "— none —")
+
+    def expired_text(self, owner_id: int) -> str:
+        slots = [s for s in self.pools.get(owner_id, []) if s.status == "expired"]
+        if not slots:
+            return "✅ No expired sessions."
+        return "**Expired**\n" + "\n".join(f"🔴 `#{s.index}` {s.label}" for s in slots)
+
+    async def set_pool(self, owner_id: int, on: bool) -> str:
+        self.active[owner_id] = on
+        async with self.db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO secondary_pool_state (owner_id, pool_active)
+                VALUES ($1,$2)
+                ON CONFLICT (owner_id) DO UPDATE SET pool_active=$2
+                """,
+                owner_id, on,
+            )
+        n = len(self.live_clients(owner_id)) if on else 0
+        if on:
+            return f"🔥 Pool **ACTIVATED** · {n} live secondaries mirror every raid"
+        return "🛑 Pool **DEACTIVATED** · secondaries idle"
+
+    def _mirror_state_set(self, owner_id: int, attr: str, uid: int, add: bool):
+        for client in self.live_clients(owner_id):
+            store = getattr(client, "_god_sets", None)
+            if store is None:
+                store = {}
+                client._god_sets = store
+            s = store.setdefault(attr, set())
+            if add:
+                s.add(uid)
+            else:
+                s.discard(uid)
+
+    def mirror_add_targets(self, owner_id: int, attr: str, uids: Set[int]):
+        if not self.active.get(owner_id):
+            return
+        for uid in uids:
+            self._mirror_state_set(owner_id, attr, uid, True)
+
+    def mirror_remove_targets(self, owner_id: int, attr: str, uids: Optional[Set[int]] = None):
+        if not self.active.get(owner_id):
+            return
+        if uids is None:
+            for client in self.live_clients(owner_id):
+                store = getattr(client, "_god_sets", None)
+                if store and attr in store:
+                    store[attr].clear()
+            return
+        for uid in uids:
+            self._mirror_state_set(owner_id, attr, uid, False)
+
+    async def mirror_spray(
+        self,
+        owner_id: int,
+        chat_id: int,
+        texts: List[str],
+        count: Optional[int] = None,
+        delay: float = 0.1,
+        reply_to: Optional[int] = None,
+        tag: str = "spray",
+    ):
+        clients = self.live_clients(owner_id)
+        if not clients:
+            return
+
+        async def _loop(client: TelegramClient):
+            sent = 0
+            while count is None or sent < count:
+                for t in texts or ["."]:
+                    if count is not None and sent >= count:
+                        return
+                    try:
+                        await _safe_send(client, chat_id, t, reply_to=reply_to)
+                        sent += 1
+                    except Exception:
+                        pass
+                    await asyncio.sleep(delay)
+
+        for c in clients:
+            asyncio.create_task(_loop(c), name=f"god_{tag}_{owner_id}_{id(c)}")
+
+    async def mirror_stop_all(self, owner_id: int):
+        for task in asyncio.all_tasks():
+            name = task.get_name() or ""
+            if name.startswith("god_") and f"_{owner_id}_" in name:
+                task.cancel()
+
+    async def mass_dm(self, owner_id: int, main_client, target, message: str) -> str:
+        clients = [main_client] + self.live_clients(owner_id)
+        results = await asyncio.gather(
+            *[_safe_send(c, target, message) for c in clients],
+            return_exceptions=True,
+        )
+        ok = sum(1 for r in results if not isinstance(r, Exception) and r is not None)
+        fail = len(results) - ok
+        return f"📨 Mass DM · OK={ok} FAIL={fail}"
+
+    async def join_gc(self, owner_id: int, main_client, link: str) -> str:
+        link = link.strip()
+        hash_part = None
+        username = None
+        if "joinchat/" in link or "+" in link:
+            if "joinchat/" in link:
+                hash_part = link.split("joinchat/")[-1].split("?")[0]
+            else:
+                hash_part = link.split("+")[-1].split("?")[0]
+        else:
+            username = link.rstrip("/").split("/")[-1]
+            if username.startswith("@"):
+                username = username[1:]
+
+        clients = [main_client] + self.live_clients(owner_id)
+        ok = fail = req = 0
+
+        async def _one(client: TelegramClient):
+            nonlocal ok, fail, req
+            try:
+                if hash_part:
+                    try:
+                        await client(ImportChatInviteRequest(hash_part))
+                        ok += 1
+                    except RPCError as e:
+                        msg = str(e).lower()
+                        if "already" in msg:
+                            ok += 1
+                        elif "request" in msg or "invite_request" in msg:
+                            req += 1
+                        else:
+                            fail += 1
+                elif username:
+                    entity = await client.get_entity(username)
+                    await client(JoinChannelRequest(entity))
+                    ok += 1
+                else:
+                    fail += 1
+            except FloodWaitError as e:
+                await _fw_sleep(e)
+                fail += 1
+            except Exception:
+                fail += 1
+
+        await asyncio.gather(*[_one(c) for c in clients])
+        return f"🔗 Join · OK={ok} REQUEST={req} FAIL={fail}"
+
+    # ══════════════════════════════════════════════════════════════════════
+    # VC – save / list / del / play / mass join
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _clip_path(self, owner_id: int, name: str) -> Path:
+        safe = "".join(c for c in name.lower() if c.isalnum() or c in "-_")[:40]
+        return CLIP_DIR / f"{owner_id}_{safe}.ogg"
+
+    async def vc_save(self, owner_id: int, name: str, source_message) -> str:
+        """Download replied voice/audio to disk and register in DB."""
+        name = (name or "").strip().lower()
+        if not name:
+            return "❌ Name required"
+        if not source_message or not (
+            source_message.voice or source_message.audio or source_message.document
+        ):
+            return "❌ Reply to a voice / audio message"
+
+        dest = self._clip_path(owner_id, name)
+        try:
+            await source_message.download_media(file=str(dest))
+        except Exception as e:
+            return f"❌ Download failed: {e}"
+
+        if not dest.is_file() or dest.stat().st_size < 64:
+            return "❌ Downloaded file empty"
+
+        async with self.db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO secondary_vc_clips (owner_id, name, file_path)
+                VALUES ($1,$2,$3)
+                ON CONFLICT (owner_id, name) DO UPDATE SET file_path=$3
+                """,
+                owner_id, name, str(dest),
+            )
+        self.vc_library.setdefault(owner_id, {})[name] = str(dest)
+        size_kb = dest.stat().st_size // 1024
+        return f"💾 Saved `{name}` · {size_kb} KB"
+
+    async def vc_list(self, owner_id: int) -> str:
+        async with self.db.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT name, file_path FROM secondary_vc_clips WHERE owner_id=$1 ORDER BY name",
+                owner_id,
+            )
+        if not rows:
+            return "📭 No saved clips.\nReply to a voice → `.vcsave <name>`"
+        lines = []
+        for r in rows:
+            p = Path(r["file_path"])
+            ok = p.is_file()
+            kb = (p.stat().st_size // 1024) if ok else 0
+            mark = "✓" if ok else "✗ missing"
+            lines.append(f"• `{r['name']}` · {kb} KB · {mark}")
+        return "**VC clips**\n" + "\n".join(lines)
+
+    async def vc_del(self, owner_id: int, name: str) -> str:
+        name = (name or "").strip().lower()
+        async with self.db.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT file_path FROM secondary_vc_clips WHERE owner_id=$1 AND name=$2",
+                owner_id, name,
+            )
+            await conn.execute(
+                "DELETE FROM secondary_vc_clips WHERE owner_id=$1 AND name=$2",
+                owner_id, name,
+            )
+        self.vc_library.get(owner_id, {}).pop(name, None)
+        if row and row["file_path"]:
+            try:
+                Path(row["file_path"]).unlink(missing_ok=True)
+            except Exception:
+                pass
+        return f"🗑 Deleted `{name}`"
+
+    async def mass_vc_join(self, owner_id: int, main_client, chat_id: int) -> str:
+        """MAIN + every ACTIVE secondary join the current group's live voice chat."""
+        clients = [main_client] + self.live_clients(owner_id)
+        joined = already = no_call = fail = 0
+
+        async def _one(client: TelegramClient):
+            nonlocal joined, already, no_call, fail
+            status = await _join_group_call(client, chat_id, muted=True)
+            if status == "joined":
+                joined += 1
+            elif status == "already":
+                already += 1
+            elif status == "no_call":
+                no_call += 1
+            else:
+                fail += 1
+
+        await asyncio.gather(*[_one(c) for c in clients])
+        parts = [f"🎙 Mass VC join · joined={joined} already={already}"]
+        if no_call:
+            parts.append(f"no_live_call={no_call}")
+        if fail:
+            parts.append(f"fail={fail}")
+        if no_call == len(clients):
+            parts.append("| Start a voice chat in the group first.")
+        return " ".join(parts)
+
+    async def play_clip(self, owner_id: int, main_client, chat_id: int, name: str) -> str:
+        """
+        1. Resolve clip path from memory/DB.
+        2. Join group call on MAIN + all live secondaries.
+        3. If py-tgcalls installed → stream file into the voice chat mixer.
+        4. Always send the file as a voice note from every account.
+        """
+        name = (name or "").strip().lower()
+        path = self.vc_library.get(owner_id, {}).get(name)
+        if not path or not Path(path).is_file():
+            async with self.db.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT file_path FROM secondary_vc_clips WHERE owner_id=$1 AND name=$2",
+                    owner_id, name,
+                )
+            if not row or not Path(row["file_path"]).is_file():
+                return f"❌ No clip `{name}` — `.vclist`"
+            path = row["file_path"]
+            self.vc_library.setdefault(owner_id, {})[name] = path
+
+        join_msg = await self.mass_vc_join(owner_id, main_client, chat_id)
+
+        streamed = stream_fail = 0
+        if HAS_PYTGCALLS:
+            targets = []
+            main_pytg = self.main_pytg.get(owner_id)
+            if main_pytg:
+                targets.append(main_pytg)
+            for slot in self.live_slots(owner_id):
+                if slot.pytg:
+                    targets.append(slot.pytg)
+
+            async def _stream(pytg):
+                nonlocal streamed, stream_fail
+                try:
+                    await pytg.play(chat_id, MediaStream(path))
+                    streamed += 1
+                except Exception:
+                    try:
+                        await pytg.join_group_call(chat_id, MediaStream(path))
+                        streamed += 1
+                    except Exception:
+                        stream_fail += 1
+
+            if targets:
+                await asyncio.gather(*[_stream(p) for p in targets])
+
+        clients = [main_client] + self.live_clients(owner_id)
+        send_ok = send_fail = 0
+
+        async def _send_vn(client: TelegramClient):
+            nonlocal send_ok, send_fail
+            r = await _safe_send_file(
+                client, chat_id, path,
+                voice_note=True,
+                supports_streaming=True,
+            )
+            if r is not None:
+                send_ok += 1
+            else:
+                send_fail += 1
+
+        await asyncio.gather(*[_send_vn(c) for c in clients])
+
+        lines = [
+            f"▶️ Play `{name}`",
+            join_msg,
+            f"Voice notes · OK={send_ok} FAIL={send_fail}",
+        ]
+        if HAS_PYTGCALLS:
+            lines.append(f"VC stream · OK={streamed} FAIL={stream_fail}")
+        else:
+            lines.append("VC stream · install `py-tgcalls` for live mixer audio")
+        return "\n".join(lines)
+
+    async def stop_play(self, owner_id: int, chat_id: int) -> str:
+        """Leave group call + stop pytgcalls streams on all accounts."""
+        stopped = 0
+        if HAS_PYTGCALLS:
+            main_pytg = self.main_pytg.get(owner_id)
+            if main_pytg:
+                try:
+                    await main_pytg.leave_group_call(chat_id)
+                    stopped += 1
+                except Exception:
+                    try:
+                        await main_pytg.stop()
+                    except Exception:
+                        pass
+            for slot in self.live_slots(owner_id):
+                if slot.pytg:
+                    try:
+                        await slot.pytg.leave_group_call(chat_id)
+                        stopped += 1
+                    except Exception:
+                        pass
+        main_client = self.mains.get(owner_id)
+        clients = ([main_client] if main_client else []) + self.live_clients(owner_id)
+        for c in clients:
+            await _leave_group_call(c, chat_id)
+        return f"⏹ Stopped · streams={stopped} · left call on {len(clients)} accounts"
+
+    def panel_text(self, owner_id: int) -> str:
+        slots = self.pools.get(owner_id, [])
+        live = sum(1 for s in slots if s.status == "live")
+        pool = "ON 🔥" if self.active.get(owner_id) else "OFF"
+        clips = len(self.vc_library.get(owner_id, {}))
+        stream = "pytgcalls ✓" if HAS_PYTGCALLS else "voice-note mode"
+        return (
+            "╔════ 🔥 GOD FEATURE ════╗\n"
+            f"║ Pool: {pool:<12} ║\n"
+            f"║ Slots: {len(slots):<3} Live: {live:<4} ║\n"
+            f"║ Clips: {clips:<3} {stream:<11} ║\n"
+            "╚═══════════════════════╝\n"
+            "Secondaries mirror every raid MAIN starts\n"
+            "when pool is ON."
+        )
+
+    def panel_buttons(self):
+        from telethon.tl.custom import Button
+        return [
+            [Button.inline("➕ Add Acc", b"god_addacc"), Button.inline("➖ Remove Acc", b"god_delacc")],
+            [Button.inline("🟢 Live Acc", b"god_live"), Button.inline("🔴 Expired", b"god_expired")],
+            [Button.inline("🎙 Mass VC Join", b"god_massvc"), Button.inline("📨 Mass DM", b"god_massdm")],
+            [Button.inline("🔗 Join GC Link", b"god_joingc")],
+            [Button.inline("🔥 Activate Pool", b"god_poolon"), Button.inline("🛑 Deactivate Pool", b"god_pooloff")],
+        ]
+
+
+def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admin, GOD: GodPool):
+    """Wire all GOD commands onto MAIN only."""
+
+    owner_id = user_bot.god_owner_id
+
+    @register_cmd("addacc")
+    async def cmd_addacc(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        parts = (arg or "").strip().split(None, 1)
+        if not parts:
+            await status_msg(event, "Usage: `.addacc <session_string> [label]`")
+            return
+        sess = parts[0]
+        label = parts[1] if len(parts) > 1 else ""
+        await status_msg(event, await GOD.add_acc(owner_id, sess, label))
+
+    @register_cmd("delacc")
+    async def cmd_delacc(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        key = (arg or "").strip()
+        if not key:
+            await status_msg(event, "Usage: `.delacc <index|label>`")
+            return
+        await status_msg(event, await GOD.del_acc(owner_id, key))
+
+    @register_cmd("listacc")
+    async def cmd_listacc(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        await status_msg(event, GOD.list_text(owner_id, only_live=False))
+
+    @register_cmd("liveacc")
+    async def cmd_liveacc(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        await status_msg(event, GOD.list_text(owner_id, only_live=True))
+
+    @register_cmd("expiredacc")
+    async def cmd_expiredacc(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        await status_msg(event, GOD.expired_text(owner_id))
+
+    @register_cmd("poolon")
+    async def cmd_poolon(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        await status_msg(event, await GOD.set_pool(owner_id, True))
+
+    @register_cmd("pooloff")
+    async def cmd_pooloff(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        await GOD.mirror_stop_all(owner_id)
+        await status_msg(event, await GOD.set_pool(owner_id, False))
+
+    @register_cmd("massdm")
+    async def cmd_massdm(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        parts = (arg or "").strip().split(None, 1)
+        if len(parts) < 2:
+            await status_msg(event, "Usage: `.massdm <user_id|@user> <message>`")
+            return
+        target_raw, message = parts[0], parts[1]
+        try:
+            target = await user_bot.get_entity(target_raw)
+        except Exception:
+            await status_msg(event, "❌ Target not found")
+            return
+        await status_msg(event, await GOD.mass_dm(owner_id, user_bot, target, message))
+
+    @register_cmd("joingc")
+    async def cmd_joingc(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        link = (arg or "").strip()
+        if not link:
+            await status_msg(event, "Usage: `.joingc <invite_link>`")
+            return
+        await status_msg(event, await GOD.join_gc(owner_id, user_bot, link))
+
+    @register_cmd("massvcjoin")
+    async def cmd_massvcjoin(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        await status_msg(event, await GOD.mass_vc_join(owner_id, user_bot, event.chat_id))
+
+    @register_cmd("vcsave")
+    async def cmd_vcsave(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        name = (arg or "").strip()
+        if not name:
+            await status_msg(event, "Usage: reply to voice + `.vcsave <name>`")
+            return
+        reply = await event.get_reply_message()
+        await status_msg(event, await GOD.vc_save(owner_id, name, reply))
+
+    @register_cmd("vclist")
+    async def cmd_vclist(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        await status_msg(event, await GOD.vc_list(owner_id))
+
+    @register_cmd("vcdel")
+    async def cmd_vcdel(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        name = (arg or "").strip()
+        if not name:
+            await status_msg(event, "Usage: `.vcdel <name>`")
+            return
+        await status_msg(event, await GOD.vc_del(owner_id, name))
+
+    @register_cmd("play")
+    async def cmd_play(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        name = (arg or "").strip()
+        if not name:
+            await status_msg(event, "Usage: `.play <name>`")
+            return
+        await status_msg(event, await GOD.play_clip(owner_id, user_bot, event.chat_id, name))
+
+    @register_cmd("stopplay")
+    async def cmd_stopplay(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        await status_msg(event, await GOD.stop_play(owner_id, event.chat_id))
+
+    return True
+
+
+def attach_secondary_reply_mirror(slot_client: TelegramClient, owner_id: int, GOD: GodPool):
+    """Optional: secondaries reply-raid when target speaks (same chat membership required)."""
+
+    @slot_client.on(events.NewMessage(incoming=True))
+    async def _mirror_reply(event):
+        if not GOD.active.get(owner_id):
+            return
+        sender = event.sender_id
+        if not sender:
+            return
+        store = getattr(slot_client, "_god_sets", {}) or {}
+        checks = [
+            ("reply_users", "💥"),
+            ("rr_users", "🤣"),
+            ("flag_users", "🚩"),
+            ("hrr_users", "💜"),
+            ("replygod_users", "⚡"),
+        ]
+        for attr, fallback in checks:
+            if sender in store.get(attr, set()):
+                try:
+                    await event.reply(fallback)
+                except FloodWaitError as e:
+                    await _fw_sleep(e)
+                except Exception:
+                    pass
+                return
+
+
+GOD = None  # set in main() after cipher init
+
 
 # ─── SESSION FUNCTIONS ──────────────────────────────────────────────
 async def save_session(user_id: int, session_str: str):
@@ -279,6 +1265,11 @@ async def load_sessions() -> dict:
 async def delete_session(user_id: int):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM user_sessions WHERE user_id=$1", user_id)
+    try:
+        if GOD is not None:
+            await GOD.teardown_owner(user_id)
+    except Exception:
+        pass
 
 # ─── FREEZE FUNCTIONS ──────────────────────────────────────────────
 async def set_freeze(user_id: int, frozen: bool):
@@ -531,6 +1522,7 @@ active_userbots = {}
 user_sessions = {}
 user_states = {}
 running_tasks = set()
+# GOD set in main() after init_cipher
 
 print("🚀 Main Bot started...")
 
@@ -612,6 +1604,7 @@ MENU_MAIN = build_box("MAIN MENU", [
     "",
     "▸ .cmds    Full command list",
     "▸ .ping    Latency check",
+    "▸ .god     GOD Feature (pool)",
 ], footer="prefix · .  |  stop · .stopall")
 
 MENU_1 = build_box("👑 ADMIN & GROUP", [
@@ -1185,9 +2178,15 @@ async def safe_reply(event, text, buttons=None, **kwargs):
         return await event.reply(text, buttons=buttons, **kwargs)
     except FloodWaitError as e:
         wait = e.seconds + 1
+        print(f"[SAFE_REPLY FLOOD] Waiting {wait}s", flush=True)
         await asyncio.sleep(wait)
-        return await event.reply(text, buttons=buttons, **kwargs)
-    except:
+        try:
+            return await event.reply(text, buttons=buttons, **kwargs)
+        except Exception as retry_error:
+            print(f"[SAFE_REPLY RETRY ERROR] {type(retry_error).__name__}: {retry_error}", flush=True)
+            return None
+    except Exception as e:
+        print(f"[SAFE_REPLY ERROR] {type(e).__name__}: {e}", flush=True)
         return None
 
 async def safe_respond(event, text, **kwargs):
@@ -1256,17 +2255,19 @@ async def status_msg(event, text, **kwargs):
         except:
             return None
 
-    if user_bot.AUTO_DELETE_STATUS_MSGS and msg:
+    client = getattr(event, "client", None)
+    if msg and getattr(client, "AUTO_DELETE_STATUS_MSGS", False):
         async def delete_later():
             try:
-                await asyncio.sleep(user_bot.AUTO_DELETE_DELAY)
+                await asyncio.sleep(getattr(client, "AUTO_DELETE_DELAY", 2))
                 await msg.delete()
             except:
                 pass
-
         task = asyncio.create_task(delete_later())
-        user_bot.auto_delete_tasks.add(task)
-        task.add_done_callback(user_bot.auto_delete_tasks.discard)
+        tasks = getattr(client, "auto_delete_tasks", None)
+        if tasks is not None:
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
     return msg
 
 async def safe_send_main(chat, text, **kwargs):
@@ -1298,20 +2299,52 @@ async def generate_redeem_code(amount: float, expiry_days: int, max_uses: Option
 
 async def redeem_code(user_id: int, code: str) -> (bool, str):
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM redeem_codes WHERE code = $1", code)
-        if not row:
-            return False, "❌ Invalid code."
-        if row['expiry_date'] and row['expiry_date'] < datetime.now():
-            return False, "❌ Code has expired."
-        if row['max_uses'] is not None and row['used_count'] >= row['max_uses']:
-            return False, "❌ Code has been fully redeemed."
-        amount = float(row['amount'])
-        await conn.execute(
-            "UPDATE redeem_codes SET used_count = used_count + 1 WHERE code = $1",
-            code
-        )
-        await add_balance(user_id, amount)
-        return True, f"✅ Successfully redeemed ₹{amount:.2f}!"
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT * FROM redeem_codes WHERE code = $1 FOR UPDATE",
+                code
+            )
+
+            if not row:
+                return False, "❌ Invalid code."
+
+            already_used = await conn.fetchval(
+                "SELECT 1 FROM redeem_code_uses WHERE code = $1 AND user_id = $2",
+                code, user_id
+            )
+            if already_used:
+                return False, "❌ You have already redeemed this code."
+
+            if row['expiry_date'] and row['expiry_date'] < datetime.now():
+                return False, "❌ Code has expired."
+
+            if row['max_uses'] is not None and row['used_count'] >= row['max_uses']:
+                return False, "❌ Code has been fully redeemed."
+
+            amount = float(row['amount'])
+
+            await conn.execute(
+                "INSERT INTO redeem_code_uses (code, user_id) VALUES ($1, $2)",
+                code, user_id
+            )
+
+            await conn.execute(
+                "UPDATE redeem_codes SET used_count = COALESCE(used_count, 0) + 1 WHERE code = $1",
+                code
+            )
+
+            await conn.execute(
+                """
+                INSERT INTO user_wallet (user_id, balance)
+                VALUES ($1, $2)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    balance = user_wallet.balance + $2,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                user_id, amount
+            )
+
+            return True, f"✅ Successfully redeemed ₹{amount:.2f}!"
 
 # ─── MAIN HANDLERS ─────────────────────────────────────────────────
 @MAIN_BOT_CLIENT.on(events.NewMessage(pattern="/start"))
@@ -2504,6 +3537,12 @@ async def run_user_bot(session_string, chat_id):
         user_bot.AUTO_DELETE_STATUS_MSGS = True
         user_bot.AUTO_DELETE_DELAY = 1
         user_bot.auto_delete_tasks = set()
+        # GOD FEATURE – secondary pool attach
+        if GOD is not None:
+            try:
+                GOD.attach(user_bot, owner_id=chat_id)
+            except Exception as _god_e:
+                print(f"[GOD] attach failed: {_god_e}")
         user_bot.CMD_RESPONSE_CACHE = set()  # Track command response msg IDs
         user_bot.react_targets = {}
         user_bot.shayari_raid = {}
@@ -13956,23 +14995,23 @@ async def run_user_bot(session_string, chat_id):
                     await asyncio.sleep(1)
             return None
 
-        async def safe_edit(event, text):
+        async def safe_edit(event, text, buttons=None, **kwargs):
             try:
-                return await event.edit(text)
+                return await event.edit(text, buttons=buttons, **kwargs)
             except FloodWaitError as fw:
                 await asyncio.sleep(fw.seconds + 1)
                 try:
-                    return await event.edit(text)
+                    return await event.edit(text, buttons=buttons, **kwargs)
                 except:
                     try:
-                        return await event.reply(text)
+                        return await event.reply(text, buttons=buttons, **kwargs)
                     except:
                         return
             except MessageNotModifiedError:
-                pass
+                return
             except Exception:
                 try:
-                    return await event.reply(text)
+                    return await event.reply(text, buttons=buttons, **kwargs)
                 except:
                     return
 
@@ -14003,6 +15042,146 @@ async def run_user_bot(session_string, chat_id):
                 pass
             return targets
 
+        def get_funny_line(category, score):
+            category = str(category).lower()
+            score = int(score)
+
+            lines = {
+                "stud": [
+                    ["Bhai personality ka software update maang raha hai 😂", "Entry maari aur confidence chhutti pe chala gaya 💀"],
+                    ["Thoda swag aur add kar bhai 😎", "Abhi hero banne ki practice chal rahi hai 😂"],
+                    ["Bhai mein dum toh hai 🔥", "Personality dheere-dheere shine kar rahi hai 😎"],
+                    ["Bhai ka attitude dekh ke log side ho jaate hain 😏", "Stud vibes aa rahi hain boss 🔥"],
+                    ["Bhai tu toh full handsome hunk nikla 👑", "Entry teri, nazrein sabki! 😎"],
+                ],
+                "looks": [
+                    ["Glow-up ka season shuru kar bhai 😂", "Aaine se dosti kar, lighting bhi improve kar 💀"],
+                    ["Theek hai bhai, potential abhi baaki hai 😎", "Thoda grooming aur style upgrade kar le 😂"],
+                    ["Achha khaasa handsome hai boss ❤️", "Looks mein solid progress hai 🔥"],
+                    ["Bhai looks toh kaafi killer hain 😍", "Aaina bhi do baar check karta hoga 😎"],
+                    ["PERFECT! Aaina bhi tujhe dekh ke proud feel karta hai 👑", "Bhai tu toh walking masterpiece hai ❤️"],
+                ],
+                "gay": [
+                    ["Ye bas random fun score hai, identity ka test nahi ❤️", "Bot ko bhi teri vibe samajhne mein time lag raha hai 😂"],
+                    ["Score random hai, tu apni marzi ka boss hai 😎", "Meter ka result hai, life ka certificate nahi ❤️"],
+                    ["Vibe check complete, judgement zero 🫶", "Bot ne number diya, identity nahi 😂"],
+                    ["Full confidence ke saath apna scene enjoy kar 🔥", "Teri vibe teri choice, boss 😎"],
+                    ["100% confidence, 100% be-yourself energy 👑", "Bot ka meter bhi bolta hai: be yourself ❤️"],
+                ],
+                "lesbian": [
+                    ["Random meter hai boss, identity ka judge nahi ❤️", "Bot ka score hai, koi real-life label nahi 😂"],
+                    ["Apni vibe mein reh, baaki sab side mein 😎", "Meter confused ho sakta hai, tu nahi 😂"],
+                    ["Confidence rakho, judgement ko block karo 🫶", "Apni story ka main character tu hai ❤️"],
+                    ["Full self-confidence energy 🔥", "Apni terms pe life jeene ka style hi alag hai 😎"],
+                    ["100% be-yourself energy 👑", "Pride, confidence aur apni marzi ❤️"],
+                ],
+                "straight": [
+                    ["Ye random fun meter hai, real identity test nahi 😂", "Bot ke numbers ko serious mat lena 😎"],
+                    ["Score random, personality original ❤️", "Apni vibe mein reh boss 😂"],
+                    ["Confidence achha hai, aise hi reh 🔥", "Bot ne vibe check kiya, certificate nahi diya 😎"],
+                    ["Full confidence mode activated 👑", "Apna swag maintain rakh boss 🔥"],
+                    ["100% confidence, zero explanation needed 😎", "Tu apni life ka boss hai 👑"],
+                ],
+                "bi": [
+                    ["Random score hai bhai, identity ka result nahi ❤️", "Bot ka meter bas masti kar raha hai 😂"],
+                    ["Apni vibe apni choice, simple 😎", "Number se kisi ki identity decide nahi hoti ❤️"],
+                    ["Confidence on point 🫶", "Bot ko bas random number generate karna aata hai 😂"],
+                    ["Be yourself wali energy 🔥", "Apni story ka hero tu khud hai 😎"],
+                    ["100% confidence aur full self-love 👑", "Apni identity, apni marzi ❤️"],
+                ],
+                "trans": [
+                    ["Ye sirf random fun score hai, identity test nahi ❤️", "Bot kisi ki identity decide nahi kar sakta 🫶"],
+                    ["Apni vibe mein reh boss 😎", "Number random hai, respect permanent ❤️"],
+                    ["Confidence aur self-respect dono zaroori hain 🫶", "Tu jaisa hai, respect deserve karta hai ❤️"],
+                    ["Full confidence energy 🔥", "Apni journey ka hero tu khud hai 😎"],
+                    ["100% self-love, 100% respect 👑", "Be yourself. That's the real flex ❤️"],
+                ],
+                "simp": [
+                    ["Bhai reply ka intezaar chhod, zindagi jee 😂", "Seen pe dil mat haar 💀"],
+                    ["Thoda self-respect bhi dikha de bhai 😭", "Online status ko future mat samajh 😂"],
+                    ["Crush ke liye effort toh full hai ❤️", "Bhai tu toh notification ka intezaar karta hai 😂"],
+                    ["Pyaar mein serious, duniya se missing 💀", "Dil tera genuine hai, bas control thoda kam 😂"],
+                    ["Bhai tu toh pyaar ka unpaid employee hai 💀", "Self-respect ne resignation de diya 😂"],
+                ],
+                "chad": [
+                    ["Bhai confidence ko thoda gym bhej 😂", "Chad banne ka tutorial abhi baaki hai 💀"],
+                    ["Potential hai, bas execution pending 😎", "Thoda aur attitude build kar bhai 😂"],
+                    ["Bhai mein chad wali vibes aa rahi hain 🔥", "Personality ka engine warm ho raha hai 😎"],
+                    ["Alpha entry, solid personality 👑", "Bhai ka aura kaafi strong hai 🔥"],
+                    ["ULTIMATE CHAD! Gym bhi salute maare 💪", "Bhai tu toh walking confidence hai 👑"],
+                ],
+                "friendly": [
+                    ["Bhai log hello bolne se bhi sochte honge 😂", "Thoda smile free mein milta hai, use kar 😭"],
+                    ["Dosti ka tutorial abhi chal raha hai 😎", "Thoda aur ghul-mil ja bhai 😂"],
+                    ["Achha dost banne ki full potential hai ❤️", "Vibe friendly hai boss 🫶"],
+                    ["Bhai se milke log khush ho jaate hain 😍", "Friend circle ka solid member 🔥"],
+                    ["Everyone's favourite person! ❤️", "Bhai jahan jaata hai, dosti wahin shuru hoti hai 👑"],
+                ],
+                "rizz": [
+                    ["Teri flirting pe autocorrect bhi sharma gaya 💀", "Bhai pickup line se pehle confidence download kar 😂"],
+                    ["Reply milna abhi bhi mission impossible hai 😭", "Thoda charm update kar le bhai 😂"],
+                    ["Rizz aa raha hai, bas timing improve kar 😎", "Crush notice kar sakti hai boss 🔥"],
+                    ["Bhai ki baaton mein magic hai ❤️", "Smooth operator in the making 😏"],
+                    ["RIZZ GOD! Seen ko reply mein badalne ka talent 👑", "Bhai ke DM mein butterflies udti hain ❤️"],
+                ],
+                "stupid": [
+                    ["Bhai aaj dimaag ghar bhool aaya kya? 😂", "Calculator bhi tujhe samjha nahi paa raha 💀"],
+                    ["Thoda soch liya kar bhai 😭", "Logic loading... please wait 😂"],
+                    ["Galtiyan hoti hain, tu collection bana raha hai 🤡", "Bhai common sense ka recharge karwa le 💀"],
+                    ["Tere decisions pe Google bhi confuse hai 😂", "Dimaag hai, bas holiday pe gaya hai 💀"],
+                    ["BHAI TU TOH CERTIFIED CARTOON HAI 🤡", "NASA ko tera dimaag research ke liye chahiye 💀"],
+                ],
+                "sigma": [
+                    ["Sigma kam, silent mode zyada lag raha hai 😂", "Bhai attitude ka network weak hai 💀"],
+                    ["Lone wolf banne ki practice chal rahi hai 😎", "Thoda confidence aur build kar bhai 😂"],
+                    ["Independent vibes aa rahi hain 🔥", "Apna kaam, apna style 😎"],
+                    ["Bhai apni lane mein king hai 👑", "No noise, just aura 🔥"],
+                    ["ULTIMATE SIGMA! Rules follow nahi, khud banata hai 🗿", "Bhai ka aura alag hi dimension mein hai 👑"],
+                ],
+                "pookie": [
+                    ["Pookie ka trial version lag raha hai 😂", "Thoda cute mode activate kar bhai 🥹"],
+                    ["Cute toh hai, bas nakhre unlimited hain 😭", "Pookie banne ki training chal rahi hai 😂"],
+                    ["Awww, pookie vibes aa rahi hain 🥹", "Thoda sa cute, thoda sa drama ❤️"],
+                    ["Certified cutie alert! 🧸", "Bhai ko dekh ke smile aa jaati hai ❤️"],
+                    ["100% POOKIE! National treasure hai tu 🥹", "Itna cute hona legal kaise hai? ❤️"],
+                ],
+                "baddie": [
+                    ["Attitude full, style ka update pending 😂", "Baddie banne ka mission abhi shuru hua hai 💅"],
+                    ["Thoda glam aur add kar boss 😎", "Confidence hai, bas killer entry baaki hai 😂"],
+                    ["Baddie vibes loading... 🔥", "Style mein dum hai boss 💅"],
+                    ["Bhai full slay mode mein hai 😍", "Entry teri, spotlight sabki 🔥"],
+                    ["100% BADDIE! Slay kar diya queen/king 👑", "Itna killer look, nazar na lag jaaye 💅"],
+                ],
+            }
+
+            if category == "iq":
+                if score < 70:
+                    return random.choice(["Bhai dimaag ka software crash ho gaya 💀", "Calculator bhi answer dene se mana kar raha hai 😂"])
+                elif score < 90:
+                    return random.choice(["Thoda aur padh le bhai, ho jayega 😂", "Dimaag abhi warm-up kar raha hai 🧠"])
+                elif score < 110:
+                    return random.choice(["Average hai bhai, tension nahi 😂", "Common sense ka connection stable hai 😎"])
+                elif score < 140:
+                    return random.choice(["Bhai dimaag toh tez chal raha hai 🔥", "Smart cookie nikla boss 🧠"])
+                else:
+                    return random.choice(["GENIUS ALERT! Einstein ka competition aa gaya 👑", "Bhai tera dimaag NASA ko outsource karna padega 🚀"])
+
+            if category not in lines:
+                return "Ye score sirf masti ke liye hai 😂"
+
+            if score < 20:
+                level = 0
+            elif score < 40:
+                level = 1
+            elif score < 60:
+                level = 2
+            elif score < 80:
+                level = 3
+            else:
+                level = 4
+
+            return random.choice(lines[category][level])
+
         def is_admin(uid):
             return uid in OWNER_IDS or uid in user_bot.admins
 
@@ -14029,8 +15208,72 @@ async def run_user_bot(session_string, chat_id):
         owner_only_commands = {
             "addtext", "edittext", "deltext", "cleartext",
             "spraydelay", "addadmin", "deladmin", "giftpremium",
-            "freeze", "unfreeze", "stopallspray", "stopall"
+            "freeze", "unfreeze", "stopallspray", "stopall",
+            "addacc", "delacc", "listacc", "liveacc", "expiredacc",
+            "poolon", "pooloff", "massdm", "joingc", "massvcjoin",
+            "vcsave", "vclist", "vcdel", "play", "stopplay",
         }
+
+        # GOD FEATURE commands (MAIN only)
+        if GOD is not None:
+            try:
+                register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admin, GOD)
+            except Exception as _god_reg_e:
+                print(f"[GOD] register_god_commands failed: {_god_reg_e}")
+
+        @register_cmd("god")
+        async def cmd_god_panel(event, arg):
+            if not is_admin(event.sender_id):
+                return
+            if GOD is None:
+                await status_msg(event, "GOD not initialized")
+                return
+            await status_msg(event, GOD.panel_text(user_bot.god_owner_id))
+            try:
+                await event.respond(GOD.panel_text(user_bot.god_owner_id), buttons=GOD.panel_buttons())
+            except Exception:
+                pass
+
+            @user_bot.on(events.CallbackQuery(data=b"god_feature"))
+            async def _god_panel_cb(event):
+                if event.sender_id != getattr(user_bot, "god_owner_id", None):
+                    return
+                try:
+                    await event.edit(GOD.panel_text(user_bot.god_owner_id), buttons=GOD.panel_buttons())
+                except Exception:
+                    await event.answer("Panel error", alert=True)
+
+            @user_bot.on(events.CallbackQuery(pattern=rb"god_"))
+            async def _god_btns_cb(event):
+                if event.sender_id != getattr(user_bot, "god_owner_id", None):
+                    return
+                data = event.data.decode() if isinstance(event.data, (bytes, bytearray)) else str(event.data)
+                oid = user_bot.god_owner_id
+                try:
+                    if data == "god_poolon":
+                        await event.answer(await GOD.set_pool(oid, True), alert=True)
+                    elif data == "god_pooloff":
+                        await GOD.mirror_stop_all(oid)
+                        await event.answer(await GOD.set_pool(oid, False), alert=True)
+                    elif data == "god_live":
+                        await event.edit(GOD.list_text(oid, only_live=True), buttons=GOD.panel_buttons())
+                    elif data == "god_expired":
+                        await event.edit(GOD.expired_text(oid), buttons=GOD.panel_buttons())
+                    elif data == "god_addacc":
+                        await event.answer("Send: .addacc <session_string> [label]", alert=True)
+                    elif data == "god_delacc":
+                        await event.answer("Send: .delacc <index|label>", alert=True)
+                    elif data == "god_massdm":
+                        await event.answer("Send: .massdm <user> <message>", alert=True)
+                    elif data == "god_joingc":
+                        await event.answer("Send: .joingc <invite_link>", alert=True)
+                    elif data == "god_massvc":
+                        msg = await GOD.mass_vc_join(oid, user_bot, event.chat_id)
+                        await event.answer(msg[:200], alert=True)
+                    elif data == "god_feature":
+                        await event.edit(GOD.panel_text(oid), buttons=GOD.panel_buttons())
+                except Exception as e:
+                    await event.answer(str(e)[:180], alert=True)
 
         # ─── MENU REGISTRATION (FIXED) ────────────────────────────────────
         @user_bot.on(events.NewMessage(pattern=r'\.(menu\d*[a-z]*)', outgoing=True))
@@ -14108,6 +15351,17 @@ async def run_user_bot(session_string, chat_id):
                 except:
                     pass
             user_bot.spray_tasks.clear()
+            # GOD FEATURE – stop mirrored tasks on secondaries
+            if GOD is not None:
+                try:
+                    await GOD.mirror_stop_all(chat_id)
+                    for _attr in (
+                        "reply_users", "rr_users", "flag_users", "hrr_users",
+                        "replygod_users", "pwr_users", "ows_users",
+                    ):
+                        GOD.mirror_remove_targets(chat_id, _attr)
+                except Exception:
+                    pass
             for _t in list(getattr(user_bot, 'mention_spam_tasks', {}).values()):
                 try: _t.cancel()
                 except Exception: pass
@@ -14788,6 +16042,11 @@ async def run_user_bot(session_string, chat_id):
             if added: msg += f"🔥 Reply raid on: {', '.join(added)}\n"
             if already: msg += f"⚠️ Already active: {', '.join(already)}"
             if not msg: msg = "❌ No changes"
+            if GOD is not None and added:
+                try:
+                    GOD.mirror_add_targets(chat_id, "reply_users", {int(x) for x in added})
+                except Exception:
+                    pass
             await safe_edit(event, msg)
 
         @register_cmd("sreply")
@@ -16072,10 +17331,11 @@ async def run_user_bot(session_string, chat_id):
 
         @register_cmd("music")
         async def cmd_music(event, arg):
-            """Search by song name / lyrics line → playable MP3 (kept in chat)."""
+            """Search YouTube and send a verified MP3."""
             if not arg or not str(arg).strip():
-                await status_msg(event, fancy_status("info", "ᴜꜱᴀɢᴇ · .music <song name or line>"))
+                await status_msg(event, fancy_status("info", "ᴜꜱᴀɢᴇ · .music <song name or URL>"))
                 return
+
             query = str(arg).strip()
             try:
                 status = await safe_edit(event, f"🎵 `searching` · `{query[:60]}`")
@@ -16083,143 +17343,257 @@ async def run_user_bot(session_string, chat_id):
                 status = None
 
             async def job():
-                path = None
+                import tempfile
+                import subprocess
+
                 try:
                     loop = asyncio.get_running_loop()
 
-                    def dl(q, search_prefix="ytsearch1"):
-                        ydl_opts = {
-                            "format": "bestaudio/best",
-                            "outtmpl": "music_%(id)s.%(ext)s",
-                            "quiet": True,
-                            "no_warnings": True,
-                            "default_search": search_prefix,
-                            "noplaylist": True,
-                            "retries": 3,
-                            "ignoreerrors": True,
-                            "postprocessors": [{
-                                "key": "FFmpegExtractAudio",
-                                "preferredcodec": "mp3",
-                                "preferredquality": "192",
-                            }],
-                            "http_headers": {
-                                "User-Agent": (
-                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                    "Chrome/120.0.0.0 Safari/537.36"
-                                )
-                            },
-                        }
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            # If user pasted a URL, use it raw; else search
-                            target = q if re.match(r"https?://", q) else q
-                            return ydl.extract_info(target, download=True)
+                    def download_track(q, workdir):
+                        import os
+                        import re
+                        import json
+                        import subprocess
+                        import urllib.parse
+                        import urllib.request
+                        import yt_dlp
 
-                    info = await loop.run_in_executor(None, lambda: dl(query, "ytsearch1"))
+                        is_url = bool(re.match(r"https?://", q))
+                        candidates = []
+                        errors = []
 
-                    # Normalize entries — never index empty list
-                    if not info:
-                        info = await loop.run_in_executor(None, lambda: dl(query, "ytsearch3"))
-                    if not info:
-                        if status:
-                            await safe_edit(event, "❌ no results")
-                        return
-
-                    if isinstance(info, dict) and "entries" in info:
-                        entries = [e for e in (info.get("entries") or []) if e]
-                        if not entries:
-                            # retry broader search
-                            info2 = await loop.run_in_executor(None, lambda: dl(query, "ytsearch5"))
-                            if isinstance(info2, dict) and "entries" in info2:
-                                entries = [e for e in (info2.get("entries") or []) if e]
-                            elif isinstance(info2, dict) and info2.get("id"):
-                                entries = [info2]
-                            info = entries[0] if entries else None
+                        if is_url:
+                            candidates.append(("Direct URL", q, "direct"))
                         else:
-                            info = entries[0]
+                            candidates.extend([
+                                ("YouTube", "ytsearch1:" + q, "search"),
+                                ("SoundCloud", "scsearch1:" + q, "search"),
+                            ])
 
-                    if not info or not isinstance(info, dict):
-                        if status:
-                            await safe_edit(event, "❌ no playable result")
-                        return
+                            # Internet Archive: search only CC/public-domain audio
+                            try:
+                                phrase = q.replace("\\", " ").replace('"', " ")
+                                params = urllib.parse.urlencode([
+                                    ("q", 'mediatype:audio AND title:"' + phrase + '"'),
+                                    ("fl[]", "identifier"),
+                                    ("fl[]", "title"),
+                                    ("rows", "5"),
+                                    ("output", "json"),
+                                ])
+                                request = urllib.request.Request(
+                                    "https://archive.org/advancedsearch.php?" + params,
+                                    headers={"User-Agent": "BotuMusic/1.0"}
+                                )
+                                with urllib.request.urlopen(request, timeout=20) as r:
+                                    results = json.loads(r.read().decode("utf-8"))
 
-                    vid = str(info.get("id") or "")
-                    title = (info.get("title") or query)[:80]
-                    artist = (info.get("uploader") or info.get("channel") or "Unknown")[:60]
-                    dur = int(info.get("duration") or 0)
+                                for item in results.get("response", {}).get("docs", []):
+                                    identifier = item.get("identifier")
+                                    if not identifier:
+                                        continue
 
-                    # Locate downloaded / converted file
-                    candidates = []
-                    if vid:
-                        candidates = (
-                            glob.glob(f"music_{vid}*.mp3")
-                            or glob.glob(f"music_{vid}.*")
+                                    try:
+                                        meta_url = (
+                                            "https://archive.org/metadata/"
+                                            + urllib.parse.quote(identifier, safe="")
+                                        )
+                                        req = urllib.request.Request(
+                                            meta_url,
+                                            headers={"User-Agent": "BotuMusic/1.0"}
+                                        )
+                                        with urllib.request.urlopen(req, timeout=20) as r:
+                                            metadata = json.loads(
+                                                r.read().decode("utf-8")
+                                            ).get("metadata", {})
+
+                                        license_text = (
+                                            str(metadata.get("licenseurl", "")) + " "
+                                            + str(metadata.get("rights", ""))
+                                        ).lower()
+
+                                        allowed = (
+                                            "creativecommons.org" in license_text
+                                            or "public domain" in license_text
+                                        )
+                                        if allowed:
+                                            candidates.append((
+                                                "Internet Archive",
+                                                "https://archive.org/details/" + identifier,
+                                                "direct"
+                                            ))
+                                    except Exception as exc:
+                                        errors.append(
+                                            "Archive metadata: " + str(exc)[:100]
+                                        )
+
+                            except Exception as exc:
+                                errors.append(
+                                    "Archive search: " + str(exc)[:120]
+                                )
+
+                        for source_index, (source, target, kind) in enumerate(candidates):
+                            try:
+                                base_opts = {
+                                    "quiet": True,
+                                    "no_warnings": True,
+                                    "noplaylist": True,
+                                    "retries": 2,
+                                    "fragment_retries": 2,
+                                    "socket_timeout": 30,
+                                }
+
+                                if (
+                                    source == "YouTube"
+                                    or "youtube.com" in target
+                                    or "youtu.be" in target
+                                ):
+                                    cookie_path = "/root/botu/youtube_cookies.txt"
+                                    if os.path.isfile(cookie_path):
+                                        base_opts["cookiefile"] = cookie_path
+                                    base_opts["js_runtimes"] = {
+                                        "deno": {"path": "/root/.deno/bin/deno"}
+                                    }
+
+                                if kind == "search":
+                                    with yt_dlp.YoutubeDL(base_opts) as ydl:
+                                        search = ydl.extract_info(
+                                            target, download=False
+                                        )
+                                    entries = (
+                                        search.get("entries") or []
+                                        if isinstance(search, dict) else []
+                                    )
+                                    urls = [
+                                        e.get("webpage_url") or e.get("url")
+                                        for e in entries if e
+                                    ]
+                                    urls = [u for u in urls if u]
+                                else:
+                                    urls = [target]
+
+                                if not urls:
+                                    raise RuntimeError("No search results")
+
+                                for result_index, video_url in enumerate(urls):
+                                    folder = os.path.join(
+                                        workdir,
+                                        "source_" + str(source_index)
+                                        + "_" + str(result_index)
+                                    )
+                                    os.makedirs(folder, exist_ok=True)
+
+                                    opts = dict(base_opts)
+                                    opts.update({
+                                        "format": "bestaudio/best",
+                                        "outtmpl": os.path.join(
+                                            folder, "%(id)s.%(ext)s"
+                                        ),
+                                        "postprocessors": [{
+                                            "key": "FFmpegExtractAudio",
+                                            "preferredcodec": "mp3",
+                                            "preferredquality": "192",
+                                        }],
+                                    })
+
+                                    with yt_dlp.YoutubeDL(opts) as ydl:
+                                        info = ydl.extract_info(
+                                            video_url, download=True
+                                        )
+
+                                    if not isinstance(info, dict):
+                                        raise RuntimeError("Invalid download result")
+
+                                    files = [
+                                        os.path.join(folder, f)
+                                        for f in os.listdir(folder)
+                                        if os.path.isfile(os.path.join(folder, f))
+                                        and not f.endswith((".part", ".ytdl", ".json"))
+                                        and os.path.getsize(
+                                            os.path.join(folder, f)
+                                        ) > 0
+                                    ]
+
+                                    mp3_files = [
+                                        f for f in files
+                                        if f.lower().endswith(".mp3")
+                                    ]
+
+                                    if not mp3_files and files:
+                                        source_file = max(files, key=os.path.getsize)
+                                        converted = (
+                                            os.path.splitext(source_file)[0] + ".mp3"
+                                        )
+                                        result = subprocess.run(
+                                            [
+                                                "ffmpeg", "-y", "-i", source_file,
+                                                "-vn", "-acodec", "libmp3lame",
+                                                "-b:a", "192k", converted
+                                            ],
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.PIPE,
+                                            timeout=180
+                                        )
+                                        if (
+                                            result.returncode == 0
+                                            and os.path.isfile(converted)
+                                            and os.path.getsize(converted) > 0
+                                        ):
+                                            mp3_files = [converted]
+
+                                    if mp3_files:
+                                        info["music_source"] = source
+                                        return info, max(
+                                            mp3_files, key=os.path.getsize
+                                        )
+
+                                raise RuntimeError("No usable audio file")
+
+                            except Exception as exc:
+                                errors.append(
+                                    source + ": " + str(exc)[:180]
+                                )
+
+                        raise RuntimeError(
+                            "All music sources failed: "
+                            + " | ".join(errors[-5:])
                         )
-                    if not candidates:
-                        # newest music_* file as last resort
-                        candidates = sorted(
-                            glob.glob("music_*.mp3") + glob.glob("music_*.m4a") + glob.glob("music_*.webm"),
-                            key=os.path.getmtime,
-                            reverse=True,
+                    with tempfile.TemporaryDirectory(prefix="botu_music_") as workdir:
+                        info, path = await loop.run_in_executor(
+                            None, lambda: download_track(query, workdir)
                         )
-                    if not candidates:
+
+                        title = str(info.get("title") or query)[:80]
+                        artist = str(
+                            info.get("uploader") or info.get("channel") or "Unknown"
+                        )[:60]
+                        duration = int(info.get("duration") or 0)
+
                         if status:
-                            await safe_edit(event, "❌ download failed (no file)")
-                        return
+                            try:
+                                await status.delete()
+                            except Exception:
+                                pass
 
-                    path = candidates[0]
-                    # If not mp3 yet, try ffmpeg quick convert
-                    if not path.lower().endswith(".mp3"):
-                        mp3_path = os.path.splitext(path)[0] + ".mp3"
-                        try:
-                            proc = await asyncio.create_subprocess_exec(
-                                "ffmpeg", "-y", "-i", path, "-vn", "-acodec", "libmp3lame",
-                                "-q:a", "4", mp3_path,
-                                stdout=asyncio.subprocess.DEVNULL,
-                                stderr=asyncio.subprocess.DEVNULL,
-                            )
-                            await proc.wait()
-                            if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0:
-                                try:
-                                    os.remove(path)
-                                except Exception:
-                                    pass
-                                path = mp3_path
-                        except Exception:
-                            pass
+                        await user_bot.send_file(
+                            event.chat_id,
+                            path,
+                            caption=(
+                                f"🎵 **{title}**\n"
+                                f"🎤 `{artist}`\n"
+                                f"⏱ `{duration // 60}:{duration % 60:02d}`"
+                            ),
+                            attributes=[
+                                types.DocumentAttributeAudio(
+                                    duration=duration,
+                                    title=title,
+                                    performer=artist,
+                                )
+                            ],
+                            supports_streaming=True,
+                        )
 
-                    safe_name = re.sub(r"[^\w\s\-\.]", "", title).strip()[:50] or "track"
-                    final = f"{safe_name}.mp3"
-                    try:
-                        if path != final:
-                            if os.path.exists(final):
-                                os.remove(final)
-                            os.rename(path, final)
-                            path = final
-                    except Exception:
-                        final = path
-
-                    if status:
-                        try:
-                            await status.delete()
-                        except Exception:
-                            pass
-
-                    await user_bot.send_file(
-                        event.chat_id,
-                        path,
-                        caption=f"🎵 **{title}**\n🎤 `{artist}`\n⏱ `{dur // 60}:{dur % 60:02d}`",
-                        attributes=[
-                            types.DocumentAttributeAudio(
-                                duration=dur,
-                                title=title,
-                                performer=artist,
-                            )
-                        ],
-                        supports_streaming=True,
-                    )
                 except Exception as e:
-                    err = str(e)[:150]
+                    err = str(e).replace("`", "'")[:250] or "Unknown error"
                     try:
                         await safe_edit(event, f"❌ music error · `{err}`")
                     except Exception:
@@ -16227,29 +17601,14 @@ async def run_user_bot(session_string, chat_id):
                             await event.reply(f"❌ music error · `{err}`")
                         except Exception:
                             pass
-                finally:
-                    for pattern in ("music_*.mp3", "music_*.webm", "music_*.m4a", "music_*.opus", "music_*.ogg"):
-                        for leftover in glob.glob(pattern):
-                            try:
-                                os.remove(leftover)
-                            except Exception:
-                                pass
-                    if path:
-                        try:
-                            os.remove(path)
-                        except Exception:
-                            pass
 
             asyncio.create_task(job())
 
         @register_cmd("dmusic")
         async def cmd_dmusic(event, arg):
-            """Same as .music — search → MP3 player, kept in chat."""
+            """Same as .music."""
             await cmd_music(event, arg)
 
-                # ─── FUN METERS ──────────────────────────────────────────────────────────
-        def get_funny_line(meter_type, percent):
-            return "✨ You're amazing! ✨"
 
         @register_cmd("studmeter")
         async def cmd_studmeter(event, arg):
@@ -17636,12 +18995,21 @@ async def run_user_bot(session_string, chat_id):
             # Snapshot original profile only on first clone of the session
             if not user_bot.CLONE_ACTIVE:
                 try:
-                    full_me = await user_bot(functions.users.GetFullUserRequest(me2.id))
+                    await status_msg(event, "⚡ Initializing: saving original profile...")
+                    full_me = await asyncio.wait_for(
+                        user_bot(functions.users.GetFullUserRequest(me2.id)),
+                        timeout=30
+                    )
                     user_bot.CLONE_DATA["name"] = me2.first_name or ""
                     user_bot.CLONE_DATA["last"] = me2.last_name or ""
                     user_bot.CLONE_DATA["bio"] = (full_me.full_user.about or "")[:70]
                     user_bot.CLONE_DATA["username"] = me2.username or ""
-                    dp = await user_bot.download_profile_photo("me", file=bytes, download_big=True)
+
+                    await status_msg(event, "⚡ Initializing: saving original photo...")
+                    dp = await asyncio.wait_for(
+                        user_bot.download_profile_photo("me", file=bytes, download_big=True),
+                        timeout=30
+                    )
                     if dp:
                         buf = BytesIO(dp)
                         buf.name = "orig.jpg"
@@ -17649,7 +19017,11 @@ async def run_user_bot(session_string, chat_id):
                         user_bot.CLONE_DATA["photo_bytes"] = buf
                     else:
                         user_bot.CLONE_DATA["photo_bytes"] = None
+
                     user_bot.CLONE_ACTIVE = True
+                except asyncio.TimeoutError:
+                    await status_msg(event, "❌ Clone initialization timed out. Please try again.")
+                    return
                 except Exception as e:
                     await status_msg(event, f"❌ Failed to snapshot original: {e}")
                     return
@@ -19450,6 +20822,15 @@ def run_web():
     serve(app, host="0.0.0.0", port=port)
 
 # ─── MAIN ────────────────────────────────────────────────────────────
+
+@MAIN_BOT_CLIENT.on(events.NewMessage)
+async def debug_incoming_messages(event):
+    print(
+        f"[INCOMING DEBUG] sender={event.sender_id} text={(event.raw_text or '')[:100]}",
+        flush=True
+    )
+
+
 async def main():
     if not API_ID or not API_HASH or not BOT_TOKEN:
         raise SystemExit(
@@ -19458,6 +20839,9 @@ async def main():
     print("Main bot starting with Web Server (Waitress)...")
     await init_db()
     await init_cipher()
+    global GOD
+    GOD = GodPool(db_pool, cipher, API_ID, API_HASH)
+    await GOD.init_tables()
     sessions = await load_sessions()
     for uid, sess_str in sessions.items():
         try:

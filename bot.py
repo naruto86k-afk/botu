@@ -78,6 +78,45 @@ def save_users(users):
 
 broadcast_users = load_users()
 
+# Curated doha collection used by the command and both GOD panels.
+DOHA_COLLECTION = [
+    ("कबीर", "बुरा जो देखन मैं चला, बुरा न मिलिया कोय।\nजो दिल खोजा आपना, मुझसे बुरा न कोय॥"),
+    ("कबीर", "धीरे-धीरे रे मना, धीरे सब कुछ होय।\nमाली सींचे सौ घड़ा, ऋतु आए फल होय॥"),
+    ("कबीर", "काल करे सो आज कर, आज करे सो अब।\nपल में परलय होएगी, बहुरि करेगा कब॥"),
+    ("कबीर", "पोथी पढ़ि पढ़ि जग मुआ, पंडित भया न कोय।\nढाई आखर प्रेम का, पढ़े सो पंडित होय॥"),
+    ("कबीर", "ऐसी वाणी बोलिए, मन का आपा खोय।\nऔरन को शीतल करे, आपहुँ शीतल होय॥"),
+    ("कबीर", "माला फेरत जुग भया, फिरा न मन का फेर।\nकर का मनका डार दे, मन का मनका फेर॥"),
+    ("कबीर", "निंदक नियरे राखिए, आँगन कुटी छवाय।\nबिन पानी साबुन बिना, निर्मल करे सुभाय॥"),
+    ("कबीर", "दुख में सुमिरन सब करें, सुख में करे न कोय।\nजो सुख में सुमिरन करे, तो दुख काहे को होय॥"),
+    ("रहीम", "रहिमन धागा प्रेम का, मत तोड़ो चटकाय।\nटूटे से फिर ना जुड़े, जुड़े गाँठ पड़ जाय॥"),
+    ("रहीम", "रहिमन पानी राखिए, बिन पानी सब सून।\nपानी गए न ऊबरे, मोती, मानुष, चून॥"),
+    ("रहीम", "रहिमन निज मन की व्यथा, मन ही राखो गोय।\nसुनि इठलैहैं लोग सब, बाँटि न लैहैं कोय॥"),
+    ("रहीम", "जो रहीम उत्तम प्रकृति, का करि सकत कुसंग।\nचंदन विष व्यापत नहीं, लिपटे रहत भुजंग॥"),
+    ("रहीम", "देनहार कोई और है, भेजत सो दिन रैन।\nलोग भरम हम पर करें, तासों नीचे नैन॥"),
+    ("रहीम", "एकै साधे सब सधै, सब साधे सब जाय।\nरहिमन मूलहि सींचिबो, फूलै फलै अघाय॥"),
+    ("रहीम", "वे रहीम नर धन्य हैं, पर उपकारी अंग।\nबाँटनवारे को लगे, ज्यों मेंहदी को रंग॥"),
+    ("तुलसीदास", "तुलसी मीठे बचन ते, सुख उपजत चहुँ ओर।\nबसीकरन इक मंत्र है, परिहरू बचन कठोर॥"),
+    ("तुलसीदास", "दया धर्म का मूल है, पाप मूल अभिमान।\nतुलसी दया न छोड़िए, जब लग घट में प्राण॥"),
+    ("तुलसीदास", "मुखिया मुखु सो चाहिए, खान-पान कहुँ एक।\nपालइ-पोषइ सकल अंग, तुलसी सहित बिबेक॥"),
+    ("बिहारी", "नहिं पराग नहिं मधुर मधु, नहिं विकास इहि काल।\nअली कली ही सौं बंध्यौ, आगे कौन हवाल॥"),
+    ("बिहारी", "कहत, नटत, रीझत, खिझत, मिलत, खिलत, लजियात।\nभरे भौन में करत हैं, नैननु हीं सब बात॥"),
+    ("बिहारी", "मेरी भव बाधा हरौ, राधा नागरि सोय।\nजा तन की झाईं परै, स्याम हरित दुति होय॥"),
+    ("वृंद", "करत-करत अभ्यास के, जड़मति होत सुजान।\nरसरी आवत जात ते, सिल पर परत निशान॥"),
+    ("वृंद", "अति का भला न बोलना, अति की भली न चूप।\nअति का भला न बरसना, अति की भली न धूप॥"),
+    ("कबीर", "जब मैं था तब हरि नहीं, अब हरि हैं मैं नाहिं।\nसब अँधियारा मिटि गया, दीपक देखा माहिं॥"),
+    ("कबीर", "साईं इतना दीजिए, जामे कुटुम समाय।\nमैं भी भूखा न रहूँ, साधु न भूखा जाय॥"),
+    ("कबीर", "माटी कहे कुम्हार से, तू क्या रौंदे मोय।\nएक दिन ऐसा आएगा, मैं रौंदूंगी तोय॥"),
+    ("कबीर", "जाति न पूछो साधु की, पूछ लीजिए ज्ञान।\nमोल करो तलवार का, पड़ा रहन दो म्यान॥"),
+    ("रहीम", "छिमा बड़न को चाहिए, छोटन को उत्पात।\nका रहीम हरि को घट्यो, जो भृगु मारी लात॥"),
+    ("रहीम", "बिगरी बात बने नहीं, लाख करो किन कोय।\nरहिमन फाटे दूध को, मथे न माखन होय॥"),
+    ("तुलसीदास", "परहित सरिस धर्म नहि भाई, पर पीड़ा सम नहि अधमाई।\nसकल सुकृत फल राम सनेहू, तुलसी कहत यही मत एहू॥"),
+    ("तुलसीदास", "जाकी रही भावना जैसी, प्रभु मूरत देखी तिन तैसी।\nजिन्ह कें रही भावना जैसी, प्रभु मूरत तिन्ह देखी तैसी॥"),
+    ("बिहारी", "सतसैया के दोहरे, ज्यों नावक के तीर।\nदेखन में छोटे लगें, घाव करें गंभीर॥"),
+    ("वृंद", "बिना विचार जो करे, सो पाछे पछताय।\nकाम बिगारे आपनो, जग में होत हँसाय॥"),
+    ("रहीम", "तरुवर फल नहिं खात हैं, सरवर पियहि न पान।\nकहि रहीम परकाज हित, संपति संचहि सुजान॥"),
+    ("कबीर", "मन के हारे हार है, मन के जीते जीत।\nकहै कबीर हरि पाइए, मन ही की परतीत॥"),
+]
+
 # ─── DATABASE & ENCRYPTION ───
 db_pool = None
 cipher = None
@@ -146,6 +185,13 @@ async def init_db():
                 user_id BIGINT,
                 blocked_id BIGINT,
                 PRIMARY KEY (user_id, blocked_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS massdm_consents (
+                user_id BIGINT PRIMARY KEY,
+                opted_in BOOLEAN NOT NULL DEFAULT TRUE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         await conn.execute("""
@@ -1368,7 +1414,36 @@ def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admi
     async def cmd_massdm(event, arg):
         if not is_admin(event.sender_id):
             return
-        await status_msg(event, "⛔ Bulk unsolicited DMs are disabled. Use an opt-in subscriber announcement workflow instead.")
+        raw = (arg or "").strip()
+        parts = raw.split(maxsplit=1)
+        if len(parts) != 2:
+            await status_msg(event, "Usage: `.massdm <user_id|@username> <message>`\nRecipient must first send `/dmoptin` to the main bot.")
+            return
+        target_ref, message = parts[0], parts[1].strip()
+        if not message:
+            await status_msg(event, "❌ Message cannot be empty.")
+            return
+        progress = await status_msg(event, "🔎 Checking recipient opt-in…")
+        try:
+            target = await user_bot.get_entity(target_ref)
+            target_id = int(target.id)
+        except Exception as exc:
+            await safe_edit(progress, f"❌ Could not resolve target: {type(exc).__name__}")
+            return
+        if db_pool is None:
+            await safe_edit(progress, "❌ Consent database is unavailable; no message was sent.")
+            return
+        async with db_pool.acquire() as conn:
+            consent = await conn.fetchval("SELECT opted_in FROM massdm_consents WHERE user_id=$1", target_id)
+        if consent is not True:
+            await safe_edit(progress, "⛔ Recipient has not opted in. Ask them to send `/dmoptin` to the main bot first. No message was sent.")
+            return
+        # Send through the owner's primary user account only; secondary pool accounts are never used.
+        try:
+            await user_bot.send_message(target_id, message)
+            await safe_edit(progress, f"📨 ᴍᴀss ᴅᴍ ʀᴇᴘᴏʀᴛ\n\nᴛᴀʀɢᴇᴛ: `{target_id}`\nꜱᴇɴᴛ: 1\nꜰᴀɪʟᴇᴅ: 0\nꜱᴛᴀᴛᴜꜱ: ᴄᴏᴍᴘʟᴇᴛᴇ")
+        except Exception as exc:
+            await safe_edit(progress, f"📨 ᴍᴀss ᴅᴍ ʀᴇᴘᴏʀᴛ\n\nᴛᴀʀɢᴇᴛ: `{target_id}`\nꜱᴇɴᴛ: 0\nꜰᴀɪʟᴇᴅ: 1\nʀᴇᴀꜱᴏɴ: {type(exc).__name__}")
 
     @register_cmd("joingc")
     async def cmd_joingc(event, arg):
@@ -1438,14 +1513,7 @@ def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admi
     async def cmd_doha(event, arg):
         if not is_admin(event.sender_id):
             return
-        dohas = [
-            ("कबीर", "बुरा जो देखन मैं चला, बुरा न मिलिया कोय।\nजो दिल खोजा आपना, मुझसे बुरा न कोय॥"),
-            ("कबीर", "धीरे-धीरे रे मना, धीरे सब कुछ होय।\nमाली सींचे सौ घड़ा, ऋतु आए फल होय॥"),
-            ("रहीम", "रहिमन धागा प्रेम का, मत तोड़ो चटकाय।\nटूटे से फिर ना जुड़े, जुड़े गाँठ पड़ जाय॥"),
-            ("रहीम", "रहिमन पानी राखिए, बिन पानी सब सून।\nपानी गए न ऊबरे, मोती, मानुष, चून॥"),
-        ]
-        import random as _random
-        poet, verse = _random.choice(dohas)
+        poet, verse = random.choice(DOHA_COLLECTION)
         await status_msg(event, f"📜 **{poet} का दोहा**\n\n{verse}")
 
     return True
@@ -2373,6 +2441,8 @@ MENU_15 = build_box("🔥 GOD FEATURE", [
     "",
     "  ◆  GROUP UTILITIES  ◆",
     "",
+    "  ▸ .massdm <user_id|@username> <message> → DM opted-in target (MAIN only)",
+    "  ▸ Recipient must send /dmoptin to the main bot; /dmoptout revokes consent",
     "  ▸ .joingc <invite_link>      → Join GC (all accounts)",
     "  ▸ .massvcjoin                → Join live voice chat",
     "",
@@ -2384,7 +2454,7 @@ MENU_15 = build_box("🔥 GOD FEATURE", [
     "  ▸ .play <song/query> → YouTube search + VC stream",
     "  ▸ .play <clip-name>  → Play saved clip",
     "  ▸ .stopplay          → Stop / leave VC",
-    "  ▸ .doha              → Kabir / Rahim doha",
+    "  ▸ .doha              → Kabir, Rahim, Tulsidas, Bihari, Vrind dohe",
     "",
     "  Pool ON → secondaries mirror MAIN raids",
     "",
@@ -2521,27 +2591,45 @@ async def safe_edit(event, text, buttons=None, **kwargs):
     # Responses are persistent by default. Never delete a message from safe_edit().
 
     return msg
-async def status_msg(event, text, *, auto_delete=False, delete_after=1, **kwargs):
-    """Status output persists unless its caller explicitly opts into deletion."""
+def _is_temporary_operation_status(value):
+    """Identify short-lived command results/progress that clutter group chats."""
+    raw = str(value or "").lower()
+    markers = (
+        "mass vc join", "voice notes", "vc stream", "joined=", "already=",
+        "fail=", "ok=", "play `", "playback stopped", "mass dm ·",
+        "mass dm report", "join · ok=", "request=", "broadcast done",
+    )
+    return any(marker in raw for marker in markers)
+
+async def status_msg(event, text, *, auto_delete=None, delete_after=7, **kwargs):
+    """Edit/reply with status; automatically clear transient operation reports."""
     try:
         msg = await event.edit(_display_font(text), **kwargs)
     except MessageNotModifiedError:
         msg = event
     except Exception:
         try:
-            msg = await event.reply(text, **kwargs)
-        except:
+            msg = await event.reply(_display_font(text), **kwargs)
+        except Exception:
             return None
 
-    client = getattr(event, "client", None)
-    if msg and auto_delete:
+    should_delete = _is_temporary_operation_status(text) if auto_delete is None else bool(auto_delete)
+    if msg and should_delete:
         async def delete_later():
+            await asyncio.sleep(max(1.0, float(delete_after)))
             try:
-                await asyncio.sleep(max(0.1, float(delete_after)))
                 await msg.delete()
             except Exception:
-                logging.exception("Temporary status cleanup failed")
+                pass
+            # If status_msg had to reply instead of editing, also remove the
+            # original command so the group is left clean.
+            try:
+                if msg is not event:
+                    await event.delete()
+            except Exception:
+                pass
         task = asyncio.create_task(delete_later())
+        client = getattr(event, "client", None)
         tasks = getattr(client, "auto_delete_tasks", None)
         if tasks is not None:
             tasks.add(task)
@@ -2625,6 +2713,34 @@ async def redeem_code(user_id: int, code: str) -> (bool, str):
             return True, f"✅ Successfully redeemed ₹{amount:.2f}!"
 
 # ─── MAIN HANDLERS ─────────────────────────────────────────────────
+@MAIN_BOT_CLIENT.on(events.NewMessage(pattern=r"/dmoptin(?:@\w+)?$"))
+async def massdm_optin_handler(event):
+    if not event.is_private or not event.sender_id:
+        return
+    if db_pool is None:
+        await event.reply("❌ Consent service is temporarily unavailable. Try again later.")
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO massdm_consents (user_id, opted_in, updated_at)
+            VALUES ($1, TRUE, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) DO UPDATE SET opted_in=TRUE, updated_at=CURRENT_TIMESTAMP
+        """, int(event.sender_id))
+    await event.reply("✅ You opted in to receive direct messages from the bot owner. Send /dmoptout anytime to stop.")
+
+@MAIN_BOT_CLIENT.on(events.NewMessage(pattern=r"/dmoptout(?:@\w+)?$"))
+async def massdm_optout_handler(event):
+    if not event.is_private or not event.sender_id:
+        return
+    if db_pool is not None:
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO massdm_consents (user_id, opted_in, updated_at)
+                VALUES ($1, FALSE, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id) DO UPDATE SET opted_in=FALSE, updated_at=CURRENT_TIMESTAMP
+            """, int(event.sender_id))
+    await event.reply("🛑 You are opted out. No further Mass DM messages will be sent unless you send /dmoptin again.")
+
 @MAIN_BOT_CLIENT.on(events.NewMessage(pattern="/start"))
 async def start_handler(event):
     user_id = event.sender_id
@@ -3202,11 +3318,7 @@ async def callback_handler(event):
             await GOD.mirror_stop_all(user_id)
             await event.answer(await GOD.set_pool(user_id, False), alert=True)
         elif data == "godbot_doha":
-            poet, verse = random.choice([
-                ("Kabir", "Bura jo dekhan main chala, bura na milya koy; jo dil khoja aapna, mujhse bura na koy."),
-                ("Kabir", "Dheere-dheere re mana, dheere sab kuch hoy; mali seenche sau ghara, ritu aaye phal hoy."),
-                ("Rahim", "Rahiman dhaaga prem ka, mat todo chatkaye; toote se phir na jude, jude gaanth pad jaye."),
-            ])
+            poet, verse = random.choice(DOHA_COLLECTION)
             await event.answer()
             await event.respond(_display_font(f"📜 {poet} Doha\n\n{verse}"))
         elif data == "godbot_join":
@@ -15869,13 +15981,7 @@ async def run_user_bot(session_string, chat_id):
                         await event.answer("Send a YouTube title or URL")
                         await start_youtube_prompt(event.chat_id)
                     elif data == "god_doha":
-                        dohas = [
-                            ("Kabir", "Bura jo dekhan main chala, bura na milya koy;\nJo dil khoja aapna, mujhse bura na koy."),
-                            ("Kabir", "Dheere-dheere re mana, dheere sab kuch hoy;\nMali seenche sau ghara, ritu aaye phal hoy."),
-                            ("Rahim", "Rahiman dhaaga prem ka, mat todo chatkaye;\nToote se phir na jude, jude gaanth pad jaye."),
-                            ("Rahim", "Rahiman paani raakhiye, bin paani sab soon;\nPaani gaye na ubare, moti, manus, choon."),
-                        ]
-                        poet, verse = random.choice(dohas)
+                        poet, verse = random.choice(DOHA_COLLECTION)
                         await event.edit(f"📜 **{poet} Doha**\n\n{verse}", buttons=GOD.panel_buttons())
                     elif data == "god_joingc":
                         if not event.is_private:

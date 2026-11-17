@@ -1154,13 +1154,18 @@ class GodPool:
 
     def panel_buttons(self):
         from telethon.tl.custom import Button
+        def btn(label, data, style="primary"):
+            try:
+                return Button.inline(_display_font(label), data=data, style=style)
+            except TypeError:
+                return Button.inline(_display_font(label), data=data)
         return [
-            [Button.inline("➕ Add Acc", b"god_addacc"), Button.inline("➖ Remove Acc", b"god_delacc")],
-            [Button.inline("🟢 Live Acc", b"god_live"), Button.inline("🔴 Expired", b"god_expired")],
-            [Button.inline("🎙 Mass VC Join", b"god_massvc"), Button.inline("🎵 YouTube Play", b"god_youtube")],
-            [Button.inline("📜 Kabir–Rahim Doha", b"god_doha"), Button.inline("🔗 Join GC Link", b"god_joingc")],
-            [Button.inline("⏹ Stop Playback", b"god_stopplay")],
-            [Button.inline("🔥 Activate Pool", b"god_poolon"), Button.inline("🛑 Deactivate Pool", b"god_pooloff")],
+            [btn("➕ Add Account", b"god_addacc", "success"), btn("➖ Remove Account", b"god_delacc", "danger")],
+            [btn("📋 All Accounts", b"god_all"), btn("🟢 Live Accounts", b"god_live", "success")],
+            [btn("🔴 Expired Accounts", b"god_expired", "danger"), btn("🔥 Pool ON", b"god_poolon", "success")],
+            [btn("🛑 Pool OFF", b"god_pooloff", "danger"), btn("🎙 Mass VC Join", b"god_massvc")],
+            [btn("🎵 YouTube Play", b"god_youtube"), btn("⏹ Stop Playback", b"god_stopplay", "danger")],
+            [btn("📜 Doha", b"god_doha"), btn("🔗 Join Group", b"god_joingc", "success")],
         ]
 
 
@@ -1172,8 +1177,9 @@ def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admi
     secondary_login_states = {}
 
     async def start_secondary_login(chat_id):
-        if int(chat_id) != int(owner_id):
-            raise ValueError("For account security, secondary login is available only in Saved Messages.")
+        bot_peer = await MAIN_BOT_CLIENT.get_me()
+        if int(chat_id) != int(bot_peer.id):
+            raise ValueError("Open this bot's private DM and use Add Account there.")
         previous = secondary_login_states.pop(chat_id, None)
         if previous and previous.get("client"):
             try:
@@ -1185,7 +1191,7 @@ def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admi
             chat_id,
             "🔐 **Add a secondary Telegram account**\n\n"
             "Send its phone number with country code (example: `+14155550123`).\n"
-            "Then send the Telegram login code and, if enabled, the 2FA password.\n"
+            "A new prompt will ask for the Telegram login code, then the 2FA password if enabled.\n"
             "Your phone/code/password messages are deleted on a best-effort basis.\n"
             "Use `.canceladdacc` to cancel."
         )
@@ -1207,10 +1213,11 @@ def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admi
         if not is_admin(event.sender_id):
             return
         if (arg or "").strip():
-            await status_msg(event, "Do not send session strings in chat. Run `.addacc` without arguments in your own Saved Messages.")
+            await status_msg(event, "Do not send session strings in chat. Run `.addacc` without arguments in this bot DM.")
             return
-        if not event.is_private or int(event.chat_id) != int(owner_id):
-            await status_msg(event, "For security, start `.addacc` in your own Saved Messages chat.")
+        bot_peer = await MAIN_BOT_CLIENT.get_me()
+        if not event.is_private or int(event.chat_id) != int(bot_peer.id):
+            await status_msg(event, "Open this bot's private DM, then use `.addacc` here. Do not use Saved Messages.")
             return
         await start_secondary_login(event.chat_id)
 
@@ -1246,7 +1253,8 @@ def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admi
             result = await GOD.play_youtube(owner_id, event.chat_id, value)
             await user_bot.send_message(event.chat_id, result)
             return
-        if not event.is_private or int(event.chat_id) != int(owner_id):
+        bot_peer = await MAIN_BOT_CLIENT.get_me()
+        if not event.is_private or int(event.chat_id) != int(bot_peer.id):
             return
         try:
             await event.delete()
@@ -2451,15 +2459,30 @@ async def shutdown_handler(sig, frame):
 signal.signal(signal.SIGTERM, lambda s, f: asyncio.create_task(shutdown_handler(s, f)))
 signal.signal(signal.SIGINT, lambda s, f: asyncio.create_task(shutdown_handler(s, f)))
 
+
+_SMALL_CAPS = str.maketrans({
+    "a":"ᴀ","b":"ʙ","c":"ᴄ","d":"ᴅ","e":"ᴇ","f":"ꜰ","g":"ɢ","h":"ʜ",
+    "i":"ɪ","j":"ᴊ","k":"ᴋ","l":"ʟ","m":"ᴍ","n":"ɴ","o":"ᴏ","p":"ᴘ",
+    "q":"ǫ","r":"ʀ","s":"ꜱ","t":"ᴛ","u":"ᴜ","v":"ᴠ","w":"ᴡ","x":"x",
+    "y":"ʏ","z":"ᴢ"
+})
+def _display_font(value):
+    if not isinstance(value, str):
+        return value
+    chunks = re.split(r"(```[\s\S]*?```|`[^`]*`|https?://\S+)", value)
+    for i in range(0, len(chunks), 2):
+        chunks[i] = chunks[i].translate(_SMALL_CAPS)
+    return "".join(chunks)
+
 async def safe_reply(event, text, buttons=None, **kwargs):
     try:
-        return await event.reply(text, buttons=buttons, **kwargs)
+        return await event.reply(_display_font(text), buttons=buttons, **kwargs)
     except FloodWaitError as e:
         wait = e.seconds + 1
         print(f"[SAFE_REPLY FLOOD] Waiting {wait}s", flush=True)
         await asyncio.sleep(wait)
         try:
-            return await event.reply(text, buttons=buttons, **kwargs)
+            return await event.reply(_display_font(text), buttons=buttons, **kwargs)
         except Exception as retry_error:
             print(f"[SAFE_REPLY RETRY ERROR] {type(retry_error).__name__}: {retry_error}", flush=True)
             return None
@@ -2469,29 +2492,29 @@ async def safe_reply(event, text, buttons=None, **kwargs):
 
 async def safe_respond(event, text, **kwargs):
     try:
-        return await event.respond(text, **kwargs)
+        return await event.respond(_display_font(text), **kwargs)
     except FloodWaitError as e:
         wait = e.seconds + 1
         await asyncio.sleep(wait)
-        return await event.respond(text, **kwargs)
+        return await event.respond(_display_font(text), **kwargs)
     except:
         return None
 
 async def safe_edit(event, text, buttons=None, **kwargs):
     try:
-        msg = await event.edit(text, buttons=buttons, **kwargs)
+        msg = await event.edit(_display_font(text), buttons=buttons, **kwargs)
     except FloodWaitError as e:
         wait = e.seconds + 1
         await asyncio.sleep(wait)
         try:
-            msg = await event.edit(text, buttons=buttons, **kwargs)
+            msg = await event.edit(_display_font(text), buttons=buttons, **kwargs)
         except:
             return None
     except MessageNotModifiedError:
         msg = event
     except:
         try:
-            msg = await event.reply(text, buttons=buttons, **kwargs)
+            msg = await event.reply(_display_font(text), buttons=buttons, **kwargs)
         except:
             return None
     
@@ -2501,7 +2524,7 @@ async def safe_edit(event, text, buttons=None, **kwargs):
 async def status_msg(event, text, *, auto_delete=False, delete_after=1, **kwargs):
     """Status output persists unless its caller explicitly opts into deletion."""
     try:
-        msg = await event.edit(text, **kwargs)
+        msg = await event.edit(_display_font(text), **kwargs)
     except MessageNotModifiedError:
         msg = event
     except Exception:
@@ -2654,7 +2677,7 @@ async def start_handler(event):
             _btn("📖  ʜᴇʟᴘ / ꜰᴇᴀᴛᴜʀᴇꜱ", "help_features"),
             Button.url("🆘  ꜱᴜᴘᴘᴏʀᴛ", "https://t.me/+QLDPV4iqXD8xMWUx"),
         ],
-        [_btn("🔥 GOD FEATURE", "start_god_menu", "primary")],
+        [_btn("🔥 ɢᴏᴅ ꜰᴇᴀᴛᴜʀᴇ", "start_god_menu", "primary")],
     ]
     if is_owner:
         buttons.append([_btn("🛠  ᴏᴡɴᴇʀ ᴘᴀɴᴇʟ", "owner_panel", "primary")])
@@ -2699,11 +2722,16 @@ async def freeze_cmd(event):
     uid = int(args[1])
     await set_freeze(uid, True)
     if uid in active_userbots:
+        client = active_userbots[uid]
         try:
-            await active_userbots[uid].send_message(uid, "❄️ Your userbot has been frozen by the owner.")
+            await client.send_message(uid, "❄️ Your userbot has been frozen by the owner.")
         except:
             pass
-    await safe_reply(event, f"✅ User {uid} frozen.")
+        try:
+            await client.disconnect()
+        except:
+            pass
+    await safe_reply(event, f"✅ User {uid} frozen. Saved session retained.")
 
 @MAIN_BOT_CLIENT.on(events.NewMessage(pattern="/unfreeze"))
 async def unfreeze_cmd(event):
@@ -2720,6 +2748,17 @@ async def unfreeze_cmd(event):
             await active_userbots[uid].send_message(uid, "🔥 Your userbot has been unfrozen by the owner.")
         except:
             pass
+    else:
+        try:
+            sessions = await load_sessions()
+            session_str = sessions.get(uid)
+            if session_str:
+                task = asyncio.create_task(run_user_bot_with_restart(session_str, uid))
+                task.set_name(f"userbot_restart_{uid}")
+                running_tasks.add(task)
+                task.add_done_callback(running_tasks.discard)
+        except Exception as exc:
+            print(f"[UNFREEZE] Could not restart {uid}: {exc}")
     await safe_reply(event, f"✅ User {uid} unfrozen.")
 
 @MAIN_BOT_CLIENT.on(events.NewMessage(pattern="/freezelist"))
@@ -2967,12 +3006,226 @@ async def handle_login_password(event):
             except:
                 pass
 
+
+owner_freeze_prompt_states = {}
+
+@MAIN_BOT_CLIENT.on(events.NewMessage(incoming=True))
+async def handle_owner_freeze_prompt(event):
+    if not event.is_private or event.sender_id not in MY_OWNER_IDS or not event.raw_text:
+        return
+    action = owner_freeze_prompt_states.pop(event.sender_id, None)
+    if not action:
+        return
+    raw = event.raw_text.strip()
+    if not raw.isdigit():
+        await MAIN_BOT_CLIENT.send_message(event.sender_id, "❌ Send a numeric Telegram user ID.")
+        owner_freeze_prompt_states[event.sender_id] = action
+        return
+    uid = int(raw)
+    await set_freeze(uid, action == "freeze")
+    if action == "freeze":
+        client = active_userbots.get(uid)
+        if client:
+            try:
+                await client.send_message(uid, "❄️ Your userbot has been frozen by the owner.")
+            except Exception:
+                pass
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        await MAIN_BOT_CLIENT.send_message(event.sender_id, f"🧊 Account `{uid}` frozen. Saved session retained.")
+    else:
+        try:
+            sessions = await load_sessions()
+            session_str = sessions.get(uid)
+            if session_str and uid not in active_userbots:
+                task = asyncio.create_task(run_user_bot_with_restart(session_str, uid))
+                task.set_name(f"userbot_restart_{uid}")
+                running_tasks.add(task)
+                task.add_done_callback(running_tasks.discard)
+        except Exception as exc:
+            print(f"[UNFREEZE] Could not restart {uid}: {exc}")
+        await MAIN_BOT_CLIENT.send_message(event.sender_id, f"🔥 Account `{uid}` unfrozen. Restart requested if a saved session exists.")
+
+
+# Interactive GOD actions run in this bot's private DM (not Saved Messages).
+god_dm_states = {}
+
+@MAIN_BOT_CLIENT.on(events.NewMessage(incoming=True))
+async def handle_god_dm_inputs(event):
+    if not event.is_private or not event.raw_text:
+        return
+    uid = event.sender_id
+    state = god_dm_states.get(uid)
+    if not state:
+        return
+    raw = event.raw_text.strip()
+    if raw.startswith("/"):
+        return
+    try:
+        await event.delete()
+    except Exception:
+        pass
+    step = state.get("step")
+    try:
+        if step == "PHONE":
+            phone = re.sub(r"[\s\-()]", "", raw)
+            if not re.fullmatch(r"\+?\d{10,15}", phone):
+                await MAIN_BOT_CLIENT.send_message(uid, "❌ Send a valid phone number with country code.")
+                return
+            client = TelegramClient(StringSession(), API_ID, API_HASH)
+            await client.connect()
+            await client.send_code_request(phone)
+            state.update({"step": "CODE", "phone": phone, "client": client})
+            await MAIN_BOT_CLIENT.send_message(uid, "📨 Step 2/3 — Telegram sent a login code. Send it here.")
+            return
+        if step == "CODE":
+            code = re.sub(r"[\s-]", "", raw)
+            if not code.isdigit():
+                await MAIN_BOT_CLIENT.send_message(uid, "❌ Send only the numeric Telegram code.")
+                return
+            client = state.get("client")
+            if not client:
+                raise RuntimeError("Login expired. Tap Add Account again.")
+            try:
+                await client.sign_in(phone=state["phone"], code=code)
+            except SessionPasswordNeededError:
+                state["step"] = "PASSWORD"
+                await MAIN_BOT_CLIENT.send_message(uid, "🔐 Step 3/3 — Two-step verification is enabled. Send your 2FA password.")
+                return
+        elif step == "PASSWORD":
+            client = state.get("client")
+            if not client:
+                raise RuntimeError("Login expired. Tap Add Account again.")
+            await client.sign_in(password=raw)
+        elif step == "DEL":
+            god_dm_states.pop(uid, None)
+            await MAIN_BOT_CLIENT.send_message(uid, await GOD.del_acc(uid, raw))
+            return
+        elif step == "JOIN":
+            god_dm_states.pop(uid, None)
+            await MAIN_BOT_CLIENT.send_message(uid, await GOD.join_gc(uid, GOD.mains.get(uid), raw))
+            return
+        elif step == "VC_CHAT":
+            if not raw.lstrip("-").isdigit():
+                await MAIN_BOT_CLIENT.send_message(uid, "❌ Send a numeric group/chat ID.")
+                return
+            god_dm_states.pop(uid, None)
+            main_client = GOD.mains.get(uid)
+            if not main_client:
+                await MAIN_BOT_CLIENT.send_message(uid, "❌ Your userbot is not online. Log in first.")
+                return
+            await MAIN_BOT_CLIENT.send_message(uid, await GOD.mass_vc_join(uid, main_client, int(raw)))
+            return
+        elif step == "YT_CHAT":
+            if not raw.lstrip("-").isdigit():
+                await MAIN_BOT_CLIENT.send_message(uid, "❌ Send a numeric group/chat ID.")
+                return
+            state.update({"step": "YT_QUERY", "chat_id": int(raw)})
+            await MAIN_BOT_CLIENT.send_message(uid, "🎵 Now send a YouTube song title or URL.")
+            return
+        elif step == "YT_QUERY":
+            chat_id = state["chat_id"]
+            god_dm_states.pop(uid, None)
+            await MAIN_BOT_CLIENT.send_message(uid, await GOD.play_youtube(uid, chat_id, raw))
+            return
+        elif step == "STOP_CHAT":
+            if not raw.lstrip("-").isdigit():
+                await MAIN_BOT_CLIENT.send_message(uid, "❌ Send a numeric group/chat ID.")
+                return
+            god_dm_states.pop(uid, None)
+            await MAIN_BOT_CLIENT.send_message(uid, await GOD.stop_play(uid, int(raw)))
+            return
+        else:
+            return
+
+        client = state["client"]
+        session_string = client.session.save()
+        me = await client.get_me()
+        label = (me.username or me.first_name or f"account-{me.id}")[:32]
+        await client.disconnect()
+        god_dm_states.pop(uid, None)
+        result = await GOD.add_acc(uid, session_string, label)
+        session_string = None
+        await MAIN_BOT_CLIENT.send_message(uid, result)
+    except FloodWaitError as exc:
+        await MAIN_BOT_CLIENT.send_message(uid, f"⏳ Telegram rate limit. Wait {exc.seconds} seconds.")
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "phonecodeinvalid" in msg or "code invalid" in msg:
+            await MAIN_BOT_CLIENT.send_message(uid, "❌ Invalid code. Send the Telegram code again.")
+        elif "password" in msg and ("invalid" in msg or "hash" in msg):
+            await MAIN_BOT_CLIENT.send_message(uid, "❌ Incorrect 2FA password. Try again.")
+        else:
+            client = state.get("client")
+            if client:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+            god_dm_states.pop(uid, None)
+            await MAIN_BOT_CLIENT.send_message(uid, f"❌ GOD action failed: {type(exc).__name__}: {str(exc)[:140]}")
+
 @MAIN_BOT_CLIENT.on(events.CallbackQuery)
 async def callback_handler(event):
     data = event.data.decode() if isinstance(event.data, (bytes, bytearray)) else event.data
     if isinstance(data, bytes):
         data = data.decode()
     user_id = event.sender_id
+
+    # ── GOD feature panel routes ──
+    if isinstance(data, str) and data.startswith("godbot_"):
+        if GOD is None:
+            await event.answer("GOD manager is not ready.", alert=True)
+            return
+        if data == "godbot_add":
+            god_dm_states[user_id] = {"step": "PHONE", "client": None}
+            await event.answer("Step 1/3")
+            await event.respond("🔐 Send the secondary account phone number with country code. Next prompts request the Telegram code and optional 2FA.")
+        elif data == "godbot_del":
+            god_dm_states[user_id] = {"step": "DEL"}
+            await event.answer()
+            await event.respond("🗑 Send the account slot number or label to remove.")
+        elif data in ("godbot_all", "godbot_live", "godbot_expired"):
+            await event.answer()
+            if data == "godbot_all":
+                result = GOD.list_text(user_id, only_live=False)
+            elif data == "godbot_live":
+                result = GOD.list_text(user_id, only_live=True)
+            else:
+                result = GOD.expired_text(user_id)
+            await event.respond(_display_font(result))
+        elif data == "godbot_poolon":
+            await event.answer(await GOD.set_pool(user_id, True), alert=True)
+        elif data == "godbot_pooloff":
+            await GOD.mirror_stop_all(user_id)
+            await event.answer(await GOD.set_pool(user_id, False), alert=True)
+        elif data == "godbot_doha":
+            poet, verse = random.choice([
+                ("Kabir", "Bura jo dekhan main chala, bura na milya koy; jo dil khoja aapna, mujhse bura na koy."),
+                ("Kabir", "Dheere-dheere re mana, dheere sab kuch hoy; mali seenche sau ghara, ritu aaye phal hoy."),
+                ("Rahim", "Rahiman dhaaga prem ka, mat todo chatkaye; toote se phir na jude, jude gaanth pad jaye."),
+            ])
+            await event.answer()
+            await event.respond(_display_font(f"📜 {poet} Doha\n\n{verse}"))
+        elif data == "godbot_join":
+            god_dm_states[user_id] = {"step": "JOIN"}
+            await event.answer()
+            await event.respond("🔗 Send a public group link or invite link.")
+        elif data == "godbot_vcjoin":
+            god_dm_states[user_id] = {"step": "VC_CHAT"}
+            await event.answer()
+            await event.respond("🎙 Send the numeric group/chat ID whose active Voice Chat should be joined.")
+        elif data == "godbot_youtube":
+            god_dm_states[user_id] = {"step": "YT_CHAT"}
+            await event.answer()
+            await event.respond("🎵 First send the numeric group/chat ID, then send the YouTube song title or URL.")
+        elif data == "godbot_stop":
+            god_dm_states[user_id] = {"step": "STOP_CHAT"}
+            await event.answer()
+            await event.respond("⏹ Send the numeric group/chat ID to stop playback.")
+        return
 
     # ── Start / Owner quick routes ──
     if data == "start_login":
@@ -2996,20 +3249,32 @@ async def callback_handler(event):
         return
     if data == "start_god_menu":
         await event.answer()
-        try:
-            body = MENU_15
-        except NameError:
-            body = "🔥 **GOD FEATURE**\nUse `.menu15` after login in your userbot."
-        try:
-            await event.respond(body)
-        except Exception:
-            await event.respond(
-                "🔥 **GOD FEATURE**\n"
-                "After login, open your userbot and use:\n"
-                "• `.menu15` — full GOD command list\n"
-                "• `.god` — panel with buttons\n"
-                "• `.addacc` / `.poolon` / `.play` / `.doha` …"
-            )
+        if GOD is None:
+            await event.respond("🔥 GOD FEATURE\\nAccount manager is not initialized yet.")
+            return
+        slots = GOD.all_slots(user_id)
+        live = sum(1 for slot in slots if slot.status == "live")
+        panel = (
+            "🔥 **GOD FEATURE CONTROL PANEL**\\n\\n"
+            f"Accounts: `{len(slots)}`  ·  Live: `{live}`\\n"
+            "Choose an action below. Secondary login is handled in this private bot chat."
+        )
+        def gbtn(label, data, style="primary"):
+            try:
+                return Button.inline(_display_font(label), data=data, style=style)
+            except TypeError:
+                return Button.inline(_display_font(label), data=data)
+        buttons = [
+            # Menu 15 buttons: Account Pool + Pool Control + Group Utilities.
+            # Voice Clips commands are intentionally NOT exposed as buttons.
+            [gbtn("➕ Add Account", "godbot_add", "success"), gbtn("➖ Remove Account", "godbot_del", "danger")],
+            [gbtn("📋 List Accounts", "godbot_all"), gbtn("🟢 Live Accounts", "godbot_live", "success")],
+            [gbtn("🔴 Expired Accounts", "godbot_expired", "danger")],
+            [gbtn("🔥 Pool ON", "godbot_poolon", "success"), gbtn("🛑 Pool OFF", "godbot_pooloff", "danger")],
+            [gbtn("🔗 Join Group (.joingc)", "godbot_join", "success"), gbtn("🎙 Mass VC Join", "godbot_vcjoin")],
+            [gbtn("📜 Doha", "godbot_doha")],
+        ]
+        await event.respond(_display_font(panel), buttons=buttons)
         return
     if data == "support_btn":
         await event.answer()
@@ -3031,13 +3296,23 @@ async def callback_handler(event):
             [Button.inline("📢 Broadcast", data="own_broadcast")],
             [Button.inline("🎁 Gift Premium", data="own_gift"), Button.inline("🎟️ Gen Redeem", data="own_gencode")],
             [Button.inline("🎬 Set Start Video", data="own_setvideo"), Button.inline("💾 Backup DB", data="own_backup")],
-            [Button.inline("📊 Stats", data="own_stats"), Button.inline(" freeze list", data="own_freezelist")],
+            [Button.inline("📊 Stats", data="own_stats"), Button.inline("❄️ Freeze List", data="own_freezelist")],
+            [Button.inline("🧊 Freeze Account", data="own_freeze_account", style="danger"),
+             Button.inline("🔥 Unfreeze Account", data="own_unfreeze_account", style="success")],
             [Button.inline("👥 Active Userbots", data="own_active")],
         ]
         try:
             await event.edit(panel, buttons=buttons)
         except Exception:
             await event.respond(panel, buttons=buttons)
+        return
+    if data in ("own_freeze_account", "own_unfreeze_account"):
+        if user_id not in MY_OWNER_IDS:
+            await event.answer("Owners only.", alert=True)
+            return
+        owner_freeze_prompt_states[user_id] = "freeze" if data == "own_freeze_account" else "unfreeze"
+        await event.answer()
+        await event.respond("🧊 Send the Telegram user ID to freeze." if data == "own_freeze_account" else "🔥 Send the Telegram user ID to unfreeze.")
         return
     if data == "own_stats":
         if user_id not in MY_OWNER_IDS:
@@ -3115,13 +3390,20 @@ async def callback_handler(event):
             await event.answer("Owners only.", alert=True)
             return
         await event.answer()
+        actions = [[
+            Button.inline("🧊 Freeze Account", data="own_freeze_account", style="danger"),
+            Button.inline("🔥 Unfreeze Account", data="own_unfreeze_account", style="success"),
+        ]]
         try:
             async with db_pool.acquire() as conn:
                 rows = await conn.fetch("SELECT user_id FROM user_freeze WHERE frozen=TRUE")
             if not rows:
-                await event.respond("No frozen users.")
+                await event.respond("❄️ No frozen accounts.", buttons=actions)
             else:
-                await event.respond("❄️ Frozen:\n" + "\n".join(f"`{r['user_id']}`" for r in rows))
+                await event.respond(
+                    "❄️ Frozen Accounts:\\n" + "\\n".join(f"`{r['user_id']}`" for r in rows),
+                    buttons=actions
+                )
         except Exception as e:
             await event.respond(f"Error: {e}")
         return
@@ -3651,6 +3933,9 @@ async def run_user_bot_with_restart(session_string, chat_id):
 
     while True:
         try:
+            if await get_freeze(chat_id):
+                print(f"[FREEZE] Userbot {chat_id} is frozen; restart suppressed.", flush=True)
+                break
             await run_user_bot(session_string, chat_id)
             break
         except FloodWaitError as e:
@@ -15291,7 +15576,7 @@ async def run_user_bot(session_string, chat_id):
             for attempt in range(retries):
                 try:
                     if isinstance(text, str):
-                        return await user_bot.send_message(chat, text, reply_to=reply_to)
+                        return await user_bot.send_message(chat, _display_font(text), reply_to=reply_to)
                     else:
                         return await user_bot.send_file(chat, text, reply_to=reply_to)
                 except FloodWaitError as fw:
@@ -15303,21 +15588,21 @@ async def run_user_bot(session_string, chat_id):
 
         async def safe_edit(event, text, buttons=None, **kwargs):
             try:
-                return await event.edit(text, buttons=buttons, **kwargs)
+                return await event.edit(_display_font(text), buttons=buttons, **kwargs)
             except FloodWaitError as fw:
                 await asyncio.sleep(fw.seconds + 1)
                 try:
-                    return await event.edit(text, buttons=buttons, **kwargs)
+                    return await event.edit(_display_font(text), buttons=buttons, **kwargs)
                 except:
                     try:
-                        return await event.reply(text, buttons=buttons, **kwargs)
+                        return await event.reply(_display_font(text), buttons=buttons, **kwargs)
                     except:
                         return
             except MessageNotModifiedError:
                 return
             except Exception:
                 try:
-                    return await event.reply(text, buttons=buttons, **kwargs)
+                    return await event.reply(_display_font(text), buttons=buttons, **kwargs)
                 except:
                     return
 
@@ -15536,7 +15821,7 @@ async def run_user_bot(session_string, chat_id):
                 return
             await status_msg(event, GOD.panel_text(user_bot.god_owner_id))
             try:
-                await event.respond(GOD.panel_text(user_bot.god_owner_id), buttons=GOD.panel_buttons())
+                await event.respond(_display_font(GOD.panel_text(user_bot.god_owner_id)), buttons=GOD.panel_buttons())
             except Exception:
                 pass
 
@@ -15545,7 +15830,7 @@ async def run_user_bot(session_string, chat_id):
                 if event.sender_id != getattr(user_bot, "god_owner_id", None):
                     return
                 try:
-                    await event.edit(GOD.panel_text(user_bot.god_owner_id), buttons=GOD.panel_buttons())
+                    await event.edit(_display_font(GOD.panel_text(user_bot.god_owner_id)), buttons=GOD.panel_buttons())
                 except Exception:
                     await event.answer("Panel error", alert=True)
 
@@ -15561,15 +15846,18 @@ async def run_user_bot(session_string, chat_id):
                     elif data == "god_pooloff":
                         await GOD.mirror_stop_all(oid)
                         await event.answer(await GOD.set_pool(oid, False), alert=True)
+                    elif data == "god_all":
+                        await event.edit(GOD.list_text(oid, only_live=False), buttons=GOD.panel_buttons())
                     elif data == "god_live":
                         await event.edit(GOD.list_text(oid, only_live=True), buttons=GOD.panel_buttons())
                     elif data == "god_expired":
                         await event.edit(GOD.expired_text(oid), buttons=GOD.panel_buttons())
                     elif data == "god_addacc":
-                        if not event.is_private or int(event.chat_id) != int(oid):
-                            await event.answer("For security, open the GOD panel in your own Saved Messages to add an account.", alert=True)
+                        bot_peer = await MAIN_BOT_CLIENT.get_me()
+                        if not event.is_private or int(event.chat_id) != int(bot_peer.id):
+                            await event.answer("Open this bot's private DM to add a secondary account.", alert=True)
                         else:
-                            await event.answer("Starting secure phone / code / 2FA login")
+                            await event.answer("Step 1/3 — send the phone number")
                             await start_secondary_login(event.chat_id)
                     elif data == "god_delacc":
                         if not event.is_private:

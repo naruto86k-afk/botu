@@ -11,6 +11,7 @@ import re
 import glob
 import signal
 import sys
+import shutil
 from typing import Dict, Set, Optional, List, Any
 from io import BytesIO
 from pathlib import Path
@@ -51,7 +52,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 if __name__ == "__main__" and (not API_ID or not API_HASH or not BOT_TOKEN):
     raise SystemExit("Missing API_ID / API_HASH / BOT_TOKEN")
 
-MY_OWNER_IDS = {int(x) for x in os.environ.get("OWNER_IDS", "8909378644,8711082433").split(",") if x.strip()}
+MY_OWNER_IDS = {int(x) for x in os.environ.get("OWNER_IDS", "").split(",") if x.strip()}
 UPI_ID = os.environ.get("UPI_ID", "paryush01@nyes")
 QR_IMAGE_PATH = os.environ.get("QR_IMAGE_PATH", "upi_qr.jpg")
 PREMIUM_FEATURES_LINK = os.environ.get("PREMIUM_FEATURES_LINK", "https://t.me/userbotsupport_ZA/20")
@@ -307,6 +308,60 @@ async def _safe_send_file(client: TelegramClient, peer, path: str, **kw):
         except Exception:
             await asyncio.sleep(0.5)
     return None
+
+
+async def _download_youtube_audio(query: str, owner_id: int):
+    """Search/download one YouTube audio track for stable local VC streaming.
+
+    PyTgCalls/FFmpeg reads the local file, avoiding short-lived YouTube media URLs.
+    The host must have FFmpeg installed; this function never starts playback itself.
+    """
+    q = (query or "").strip()
+    if not q:
+        raise ValueError("Search query is empty")
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("FFmpeg executable was not found on PATH")
+    target = q if re.match(r"https?://(www\.)?(youtube\.com|youtu\.be)/", q) else f"ytsearch1:{q}"
+    out_dir = CLIP_DIR / f"{owner_id}_youtube"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    opts = {
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "outtmpl": str(out_dir / "%(id)s.%(ext)s"),
+        "cachedir": False,
+        "restrictfilenames": True,
+    }
+
+    def _download():
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(target, download=False)
+            if info and info.get("entries"):
+                info = next((item for item in info["entries"] if item), None)
+            if not info:
+                raise RuntimeError("No YouTube search result was found")
+            page_url = info.get("webpage_url") or info.get("original_url")
+            if not page_url and info.get("id"):
+                page_url = f"https://www.youtube.com/watch?v={info['id']}"
+            if not page_url:
+                raise RuntimeError("Could not resolve the YouTube video URL")
+            downloaded = ydl.extract_info(page_url, download=True)
+            filepath = ydl.prepare_filename(downloaded)
+            if not Path(filepath).is_file():
+                # Some extractors update the extension during download.
+                candidates = sorted(out_dir.glob(f"{downloaded.get('id', info.get('id', '*'))}.*"),
+                                    key=lambda item: item.stat().st_mtime, reverse=True)
+                filepath = str(candidates[0]) if candidates else ""
+            if not filepath or not Path(filepath).is_file() or Path(filepath).stat().st_size < 1024:
+                raise RuntimeError("YouTube audio download did not produce a playable file")
+            return {
+                "title": downloaded.get("title") or info.get("title") or "YouTube audio",
+                "path": filepath,
+                "webpage_url": downloaded.get("webpage_url") or page_url,
+                "duration": downloaded.get("duration") or info.get("duration"),
+            }
+    return await asyncio.to_thread(_download)
 
 
 async def _resolve_group_call(client: TelegramClient, chat_id: int):
@@ -1014,6 +1069,40 @@ class GodPool:
             lines.append("VC stream · install `py-tgcalls` for live mixer audio")
         return "\n".join(lines)
 
+    async def play_youtube(self, owner_id: int, chat_id: int, query: str) -> str:
+        """Search YouTube and stream the selected audio into this group's voice chat."""
+        if not HAS_PYTGCALLS:
+            return "❌ Voice Chat streaming needs py-tgcalls installed and working."
+        pytg = self.main_pytg.get(owner_id)
+        if not pytg:
+            return "❌ PyTgCalls is not ready for the main account. Check logs / restart."
+        media = None
+        try:
+            media = await _download_youtube_audio(query, owner_id)
+            # PyTgCalls starts/joins the group call and streams this local file via FFmpeg.
+            await pytg.play(chat_id, MediaStream(media["path"]))
+            active = getattr(self, "youtube_playing", None)
+            if active is None:
+                self.youtube_playing = {}
+            previous = self.youtube_playing.get((owner_id, chat_id))
+            self.youtube_playing[(owner_id, chat_id)] = media["path"]
+            if previous and previous != media["path"]:
+                try:
+                    Path(previous).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            duration = media.get("duration")
+            dur = f" · {int(duration)//60}:{int(duration)%60:02d}" if duration else ""
+            return f"🎵 **Now playing:** {media['title']}{dur}\n{media['webpage_url']}"
+        except Exception as e:
+            logging.exception("YouTube VC playback failed")
+            if media and media.get("path"):
+                try:
+                    Path(media["path"]).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            return f"❌ YouTube playback failed: {type(e).__name__}: {str(e)[:180]}"
+
     async def stop_play(self, owner_id: int, chat_id: int) -> str:
         """Leave group call + stop pytgcalls streams on all accounts."""
         stopped = 0
@@ -1039,6 +1128,12 @@ class GodPool:
         clients = ([main_client] if main_client else []) + self.live_clients(owner_id)
         for c in clients:
             await _leave_group_call(c, chat_id)
+        path = getattr(self, "youtube_playing", {}).pop((owner_id, chat_id), None)
+        if path:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except Exception:
+                pass
         return f"⏹ Stopped · streams={stopped} · left call on {len(clients)} accounts"
 
     def panel_text(self, owner_id: int) -> str:
@@ -1062,8 +1157,9 @@ class GodPool:
         return [
             [Button.inline("➕ Add Acc", b"god_addacc"), Button.inline("➖ Remove Acc", b"god_delacc")],
             [Button.inline("🟢 Live Acc", b"god_live"), Button.inline("🔴 Expired", b"god_expired")],
-            [Button.inline("🎙 Mass VC Join", b"god_massvc"), Button.inline("📨 Mass DM", b"god_massdm")],
-            [Button.inline("🔗 Join GC Link", b"god_joingc")],
+            [Button.inline("🎙 Mass VC Join", b"god_massvc"), Button.inline("🎵 YouTube Play", b"god_youtube")],
+            [Button.inline("📜 Kabir–Rahim Doha", b"god_doha"), Button.inline("🔗 Join GC Link", b"god_joingc")],
+            [Button.inline("⏹ Stop Playback", b"god_stopplay")],
             [Button.inline("🔥 Activate Pool", b"god_poolon"), Button.inline("🛑 Deactivate Pool", b"god_pooloff")],
         ]
 
@@ -1073,17 +1169,151 @@ def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admi
 
     owner_id = user_bot.god_owner_id
 
+    secondary_login_states = {}
+
+    async def start_secondary_login(chat_id):
+        if int(chat_id) != int(owner_id):
+            raise ValueError("For account security, secondary login is available only in Saved Messages.")
+        previous = secondary_login_states.pop(chat_id, None)
+        if previous and previous.get("client"):
+            try:
+                await previous["client"].disconnect()
+            except Exception:
+                pass
+        secondary_login_states[chat_id] = {"step": "PHONE", "client": None, "phone": None}
+        await user_bot.send_message(
+            chat_id,
+            "🔐 **Add a secondary Telegram account**\n\n"
+            "Send its phone number with country code (example: `+14155550123`).\n"
+            "Then send the Telegram login code and, if enabled, the 2FA password.\n"
+            "Your phone/code/password messages are deleted on a best-effort basis.\n"
+            "Use `.canceladdacc` to cancel."
+        )
+
+    async def start_youtube_prompt(chat_id):
+        secondary_login_states[chat_id] = {"step": "PLAY_QUERY", "client": None}
+        await user_bot.send_message(
+            chat_id,
+            "🎵 Send a YouTube song title or YouTube URL to play in this chat's active Voice Chat.\n"
+            "Use `.canceladdacc` to cancel this prompt."
+        )
+
+    async def start_panel_input(chat_id, step, prompt):
+        secondary_login_states[chat_id] = {"step": step, "client": None}
+        await user_bot.send_message(chat_id, prompt + "\nUse `.canceladdacc` to cancel.")
+
     @register_cmd("addacc")
     async def cmd_addacc(event, arg):
         if not is_admin(event.sender_id):
             return
-        parts = (arg or "").strip().split(None, 1)
-        if not parts:
-            await status_msg(event, "Usage: `.addacc <session_string> [label]`")
+        if (arg or "").strip():
+            await status_msg(event, "Do not send session strings in chat. Run `.addacc` without arguments in your own Saved Messages.")
             return
-        sess = parts[0]
-        label = parts[1] if len(parts) > 1 else ""
-        await status_msg(event, await GOD.add_acc(owner_id, sess, label))
+        if not event.is_private or int(event.chat_id) != int(owner_id):
+            await status_msg(event, "For security, start `.addacc` in your own Saved Messages chat.")
+            return
+        await start_secondary_login(event.chat_id)
+
+    @register_cmd("canceladdacc")
+    async def cmd_cancel_addacc(event, arg):
+        state = secondary_login_states.pop(event.chat_id, None)
+        if state and state.get("client"):
+            try:
+                await state["client"].disconnect()
+            except Exception:
+                pass
+        await status_msg(event, "🛑 Secondary account login cancelled.")
+
+    @user_bot.on(events.NewMessage(outgoing=True))
+    async def secondary_login_input(event):
+        # Interactive credentials are accepted only in the chat that started .addacc.
+        state = secondary_login_states.get(event.chat_id)
+        if not state or not event.raw_text or event.raw_text.startswith("."):
+            return
+        value = event.raw_text.strip()
+        if state.get("step") == "DEL_ACCOUNT":
+            secondary_login_states.pop(event.chat_id, None)
+            result = await GOD.del_acc(owner_id, value)
+            await user_bot.send_message(event.chat_id, result)
+            return
+        if state.get("step") == "JOIN_GROUP":
+            secondary_login_states.pop(event.chat_id, None)
+            result = await GOD.join_gc(owner_id, user_bot, value)
+            await user_bot.send_message(event.chat_id, result)
+            return
+        if state.get("step") == "PLAY_QUERY":
+            secondary_login_states.pop(event.chat_id, None)
+            result = await GOD.play_youtube(owner_id, event.chat_id, value)
+            await user_bot.send_message(event.chat_id, result)
+            return
+        if not event.is_private or int(event.chat_id) != int(owner_id):
+            return
+        try:
+            await event.delete()
+        except Exception:
+            pass
+        try:
+            if state["step"] == "PHONE":
+                phone = re.sub(r"[\s\-\(\)]", "", value)
+                if not re.fullmatch(r"\+?\d{10,15}", phone):
+                    await user_bot.send_message(event.chat_id, "❌ Invalid phone number. Send it with country code.")
+                    return
+                client = TelegramClient(StringSession(), API_ID, API_HASH)
+                state.update({"step": "SENDING_CODE", "phone": phone, "client": client})
+                await client.connect()
+                await client.send_code_request(phone)
+                state.update({"step": "CODE", "phone": phone, "client": client})
+                await user_bot.send_message(event.chat_id, "📨 Telegram code sent. Send the numeric login code here.")
+                return
+            if state["step"] == "CODE":
+                code = re.sub(r"[\s-]", "", value)
+                if not code.isdigit():
+                    await user_bot.send_message(event.chat_id, "❌ Send only the numeric Telegram login code.")
+                    return
+                client = state.get("client")
+                if not client:
+                    raise RuntimeError("Login expired. Start `.addacc` again.")
+                try:
+                    await client.sign_in(phone=state["phone"], code=code)
+                except SessionPasswordNeededError:
+                    state["step"] = "PASSWORD"
+                    await user_bot.send_message(event.chat_id, "🔐 Two-step verification is enabled. Send your 2FA password.")
+                    return
+            elif state["step"] == "PASSWORD":
+                client = state.get("client")
+                if not client:
+                    raise RuntimeError("Login expired. Start `.addacc` again.")
+                await client.sign_in(password=value)
+            else:
+                return
+
+            client = state["client"]
+            session_string = client.session.save()
+            me = await client.get_me()
+            label = (me.username or me.first_name or f"account-{me.id}")[:32]
+            await client.disconnect()
+            secondary_login_states.pop(event.chat_id, None)
+            result = await GOD.add_acc(owner_id, session_string, label)
+            await user_bot.send_message(event.chat_id, result)
+            # Avoid retaining the session string in this state machine after persistence.
+            session_string = None
+        except FloodWaitError as exc:
+            await user_bot.send_message(event.chat_id, f"⏳ Telegram rate limit. Wait {exc.seconds} seconds before trying again.")
+        except Exception as exc:
+            message = str(exc).lower()
+            if "phonecodeinvalid" in message or "code invalid" in message:
+                await user_bot.send_message(event.chat_id, "❌ Invalid login code. Send the code again.")
+            elif "password" in message and ("invalid" in message or "hash" in message):
+                await user_bot.send_message(event.chat_id, "❌ Incorrect 2FA password. Try again.")
+            else:
+                secondary_login_states.pop(event.chat_id, None)
+                client = state.get("client")
+                if client:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                await user_bot.send_message(event.chat_id, f"❌ Secondary login failed: {type(exc).__name__}: {str(exc)[:160]}")
 
     @register_cmd("delacc")
     async def cmd_delacc(event, arg):
@@ -1130,17 +1360,7 @@ def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admi
     async def cmd_massdm(event, arg):
         if not is_admin(event.sender_id):
             return
-        parts = (arg or "").strip().split(None, 1)
-        if len(parts) < 2:
-            await status_msg(event, "Usage: `.massdm <user_id|@user> <message>`")
-            return
-        target_raw, message = parts[0], parts[1]
-        try:
-            target = await user_bot.get_entity(target_raw)
-        except Exception:
-            await status_msg(event, "❌ Target not found")
-            return
-        await status_msg(event, await GOD.mass_dm(owner_id, user_bot, target, message))
+        await status_msg(event, "⛔ Bulk unsolicited DMs are disabled. Use an opt-in subscriber announcement workflow instead.")
 
     @register_cmd("joingc")
     async def cmd_joingc(event, arg):
@@ -1189,17 +1409,36 @@ def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admi
     async def cmd_play(event, arg):
         if not is_admin(event.sender_id):
             return
-        name = (arg or "").strip()
-        if not name:
-            await status_msg(event, "Usage: `.play <name>`")
+        query = (arg or "").strip()
+        if not query:
+            await status_msg(event, "Usage: `.play <YouTube search or URL>` (saved clips also work)")
             return
-        await status_msg(event, await GOD.play_clip(owner_id, user_bot, event.chat_id, name))
+        saved = GOD.vc_library.get(owner_id, {}).get(query.lower())
+        if saved and Path(saved).is_file():
+            result = await GOD.play_clip(owner_id, user_bot, event.chat_id, query)
+        else:
+            result = await GOD.play_youtube(owner_id, event.chat_id, query)
+        await status_msg(event, result)
 
     @register_cmd("stopplay")
     async def cmd_stopplay(event, arg):
         if not is_admin(event.sender_id):
             return
         await status_msg(event, await GOD.stop_play(owner_id, event.chat_id))
+
+    @register_cmd("doha")
+    async def cmd_doha(event, arg):
+        if not is_admin(event.sender_id):
+            return
+        dohas = [
+            ("कबीर", "बुरा जो देखन मैं चला, बुरा न मिलिया कोय।\nजो दिल खोजा आपना, मुझसे बुरा न कोय॥"),
+            ("कबीर", "धीरे-धीरे रे मना, धीरे सब कुछ होय।\nमाली सींचे सौ घड़ा, ऋतु आए फल होय॥"),
+            ("रहीम", "रहिमन धागा प्रेम का, मत तोड़ो चटकाय।\nटूटे से फिर ना जुड़े, जुड़े गाँठ पड़ जाय॥"),
+            ("रहीम", "रहिमन पानी राखिए, बिन पानी सब सून।\nपानी गए न ऊबरे, मोती, मानुष, चून॥"),
+        ]
+        import random as _random
+        poet, verse = _random.choice(dohas)
+        await status_msg(event, f"📜 **{poet} का दोहा**\n\n{verse}")
 
     return True
 
@@ -2112,7 +2351,7 @@ MENU_15 = build_box("🔥 GOD FEATURE", [
     "",
     "  ◆  ACCOUNT POOL  ◆",
     "",
-    "  ▸ .addacc <session> [label]  → Add secondary",
+    "  ▸ .addacc              → Add secondary via phone / OTP / 2FA",
     "  ▸ .delacc <index|label>      → Remove secondary",
     "  ▸ .listacc                   → All secondaries",
     "  ▸ .liveacc                   → Live only",
@@ -2124,9 +2363,8 @@ MENU_15 = build_box("🔥 GOD FEATURE", [
     "  ▸ .pooloff  → Deactivate pool",
     "  ▸ .god      → Panel with buttons",
     "",
-    "  ◆  MASS ACTIONS  ◆",
+    "  ◆  GROUP UTILITIES  ◆",
     "",
-    "  ▸ .massdm <user> <msg>       → DM from all accounts",
     "  ▸ .joingc <invite_link>      → Join GC (all accounts)",
     "  ▸ .massvcjoin                → Join live voice chat",
     "",
@@ -2135,8 +2373,10 @@ MENU_15 = build_box("🔥 GOD FEATURE", [
     "  ▸ .vcsave <name>   → Save (reply to voice)",
     "  ▸ .vclist          → List clips",
     "  ▸ .vcdel <name>    → Delete clip",
-    "  ▸ .play <name>     → Play on all accounts",
-    "  ▸ .stopplay        → Stop / leave VC",
+    "  ▸ .play <song/query> → YouTube search + VC stream",
+    "  ▸ .play <clip-name>  → Play saved clip",
+    "  ▸ .stopplay          → Stop / leave VC",
+    "  ▸ .doha              → Kabir / Rahim doha",
     "",
     "  Pool ON → secondaries mirror MAIN raids",
     "",
@@ -2255,34 +2495,11 @@ async def safe_edit(event, text, buttons=None, **kwargs):
         except:
             return None
     
-    # ─── AUTO-DELETE COMMAND RESPONSE ───
-    try:
-        if msg and AUTO_DELETE_ENABLED:
-            # Menu ko 5 sec, baaki sab ko 2 sec
-            is_menu = any(x in text for x in [
-                "📖 MAIN MENU", "👑 ADMIN", "⚔️ RAID", "💣 SPAM",
-                "🛡️ PROTECTION", "⚙️ TOOLS", "📨 SEND", "🎭 FUN",
-                "🎯 FUN RAIDS", "💢 NON-ABUSIVE", "🎮 GAMES",
-                "✨ PREMIUM", "🌟 PREMIUM", "🔰 PROTECTION",
-                "💥 PREMIUM RAIDS", "🔥 PREMIUM SPAM"
-            ])
-            delay = 5 if is_menu else 2
-            
-            async def delete_later(m=msg, d=delay):
-                try:
-                    await asyncio.sleep(d)
-                    await m.delete()
-                except:
-                    pass
-            task = asyncio.create_task(delete_later())
-            active_auto_delete_tasks.add(task)
-            task.add_done_callback(active_auto_delete_tasks.discard)
-    except:
-        pass
-    
+    # Responses are persistent by default. Never delete a message from safe_edit().
+
     return msg
-async def status_msg(event, text, **kwargs):
-    """Send a status message that auto-deletes after 2 sec"""
+async def status_msg(event, text, *, auto_delete=False, delete_after=1, **kwargs):
+    """Status output persists unless its caller explicitly opts into deletion."""
     try:
         msg = await event.edit(text, **kwargs)
     except MessageNotModifiedError:
@@ -2294,13 +2511,13 @@ async def status_msg(event, text, **kwargs):
             return None
 
     client = getattr(event, "client", None)
-    if msg and getattr(client, "AUTO_DELETE_STATUS_MSGS", False):
+    if msg and auto_delete:
         async def delete_later():
             try:
-                await asyncio.sleep(getattr(client, "AUTO_DELETE_DELAY", 2))
+                await asyncio.sleep(max(0.1, float(delete_after)))
                 await msg.delete()
-            except:
-                pass
+            except Exception:
+                logging.exception("Temporary status cleanup failed")
         task = asyncio.create_task(delete_later())
         tasks = getattr(client, "auto_delete_tasks", None)
         if tasks is not None:
@@ -2517,6 +2734,20 @@ async def freezelist_cmd(event):
     msg = "❄️ **Frozen Users:**\n" + "\n".join(f"• `{r['user_id']}`" for r in rows)
     await safe_reply(event, msg)
 
+@MAIN_BOT_CLIENT.on(events.NewMessage(pattern="/cancel_login"))
+async def cancel_login_handler(event):
+    if not event.is_private:
+        return
+    state = user_states.pop(event.sender_id, None)
+    client = state.get("temp_client") if state else None
+    if client:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    await safe_reply(event, "🛑 Login flow cancelled. Start again with `/login` when ready.")
+
+
 @MAIN_BOT_CLIENT.on(events.NewMessage(pattern="/login"))
 async def login_handler(event):
     if not event.is_private:
@@ -2534,11 +2765,17 @@ async def login_handler(event):
         buttons = get_join_buttons()
         await safe_reply(event, msg, buttons=buttons)
         return
+    previous = user_states.pop(user_id, None)
+    if previous and previous.get("temp_client"):
+        try:
+            await previous["temp_client"].disconnect()
+        except Exception:
+            pass
     user_states[user_id] = {"step": "NUMBER"}
     await safe_reply(
         event,
         "📱 **Step 1:** Please send your Telegram phone number **with country code**.\n"
-        "Example: `+919876543210`"
+        "Example: `+919876543210`\nSend `/cancel_login` to abort."
     )
 
 @MAIN_BOT_CLIENT.on(events.NewMessage)
@@ -2552,6 +2789,10 @@ async def handle_login_phone(event):
     if not state or state.get("step") != "NUMBER":
         return
     phone = event.raw_text.strip()
+    try:
+        await event.delete()
+    except Exception:
+        pass
     phone = re.sub(r'[\s\-\(\)]', '', phone)
     if not re.match(r'^\+?\d{10,15}$', phone):
         await safe_reply(event, "❌ Invalid phone number format. Please send with country code, e.g., `+919876543210`")
@@ -2597,6 +2838,10 @@ async def handle_login_code(event):
     if not state or state.get("step") != "CODE":
         return
     code = event.raw_text.strip().replace(" ", "").replace("-", "")
+    try:
+        await event.delete()
+    except Exception:
+        pass
     if not code.isdigit():
         await safe_reply(event, "❌ Please send only the numeric code (e.g., `12345`). Spaces are allowed.")
         return
@@ -2666,6 +2911,10 @@ async def handle_login_password(event):
     if not state or state.get("step") != "PASSWORD":
         return
     password = event.raw_text.strip()
+    try:
+        await event.delete()
+    except Exception:
+        pass
     temp_client = state.get("temp_client")
     if not temp_client:
         await safe_reply(event, "❌ Session expired. Please start again with `/login`.")
@@ -2759,7 +3008,7 @@ async def callback_handler(event):
                 "After login, open your userbot and use:\n"
                 "• `.menu15` — full GOD command list\n"
                 "• `.god` — panel with buttons\n"
-                "• `.addacc` / `.poolon` / `.massdm` / `.play` …"
+                "• `.addacc` / `.poolon` / `.play` / `.doha` …"
             )
         return
     if data == "support_btn":
@@ -3590,7 +3839,8 @@ async def run_user_bot(session_string, chat_id):
         ]
         user_bot.START_TIME = time.time()
         # ─── AUTO-DELETE CONTROL ───
-        user_bot.AUTO_DELETE_STATUS_MSGS = True
+        # Only status_msg(..., auto_delete=True) may delete its own status output.
+        user_bot.AUTO_DELETE_STATUS_MSGS = False
         user_bot.AUTO_DELETE_DELAY = 1
         user_bot.auto_delete_tasks = set()
         # GOD FEATURE – secondary pool attach
@@ -15266,7 +15516,7 @@ async def run_user_bot(session_string, chat_id):
             "spraydelay", "addadmin", "deladmin", "giftpremium",
             "freeze", "unfreeze", "stopallspray", "stopall",
             "addacc", "delacc", "listacc", "liveacc", "expiredacc",
-            "poolon", "pooloff", "massdm", "joingc", "massvcjoin",
+            "poolon", "pooloff", "joingc", "massvcjoin", "doha",
             "vcsave", "vclist", "vcdel", "play", "stopplay",
         }
 
@@ -15316,13 +15566,37 @@ async def run_user_bot(session_string, chat_id):
                     elif data == "god_expired":
                         await event.edit(GOD.expired_text(oid), buttons=GOD.panel_buttons())
                     elif data == "god_addacc":
-                        await event.answer("Send: .addacc <session_string> [label]", alert=True)
+                        if not event.is_private or int(event.chat_id) != int(oid):
+                            await event.answer("For security, open the GOD panel in your own Saved Messages to add an account.", alert=True)
+                        else:
+                            await event.answer("Starting secure phone / code / 2FA login")
+                            await start_secondary_login(event.chat_id)
                     elif data == "god_delacc":
-                        await event.answer("Send: .delacc <index|label>", alert=True)
-                    elif data == "god_massdm":
-                        await event.answer("Send: .massdm <user> <message>", alert=True)
+                        if not event.is_private:
+                            await event.answer("Open the GOD panel in a private chat to remove an account.", alert=True)
+                        else:
+                            await event.answer("Enter the secondary account number or label")
+                            await start_panel_input(event.chat_id, "DEL_ACCOUNT", "🗑 Send the account index or label to remove:")
+                    elif data == "god_youtube":
+                        await event.answer("Send a YouTube title or URL")
+                        await start_youtube_prompt(event.chat_id)
+                    elif data == "god_doha":
+                        dohas = [
+                            ("Kabir", "Bura jo dekhan main chala, bura na milya koy;\nJo dil khoja aapna, mujhse bura na koy."),
+                            ("Kabir", "Dheere-dheere re mana, dheere sab kuch hoy;\nMali seenche sau ghara, ritu aaye phal hoy."),
+                            ("Rahim", "Rahiman dhaaga prem ka, mat todo chatkaye;\nToote se phir na jude, jude gaanth pad jaye."),
+                            ("Rahim", "Rahiman paani raakhiye, bin paani sab soon;\nPaani gaye na ubare, moti, manus, choon."),
+                        ]
+                        poet, verse = random.choice(dohas)
+                        await event.edit(f"📜 **{poet} Doha**\n\n{verse}", buttons=GOD.panel_buttons())
                     elif data == "god_joingc":
-                        await event.answer("Send: .joingc <invite_link>", alert=True)
+                        if not event.is_private:
+                            await event.answer("Open the GOD panel in a private chat to enter an invite link.", alert=True)
+                        else:
+                            await event.answer("Send the group invite link")
+                            await start_panel_input(event.chat_id, "JOIN_GROUP", "🔗 Send a public group link or invite link:")
+                    elif data == "god_stopplay":
+                        await event.answer(await GOD.stop_play(oid, event.chat_id), alert=True)
                     elif data == "god_massvc":
                         msg = await GOD.mass_vc_join(oid, user_bot, event.chat_id)
                         await event.answer(msg[:200], alert=True)
@@ -19731,6 +20005,9 @@ async def run_user_bot(session_string, chat_id):
         # ─── CLEARME ────────────────────────────────────────────────────────────
         @register_cmd("clearme")
         async def cmd_clearme(event, arg):
+            if (arg or "").strip().lower() != "confirm":
+                await safe_edit(event, "⚠️ This deletes all of your messages in this chat. Run `.clearme confirm` to proceed.")
+                return
             cid = event.chat_id
             deleted = 0
             try:
@@ -19748,8 +20025,11 @@ async def run_user_bot(session_string, chat_id):
         # ─── DLTALL ─────────────────────────────────────────────────────────────
         @register_cmd("dltall")
         async def cmd_dltall(event, arg):
+            if (arg or "").strip().lower() != "confirm":
+                await safe_edit(event, "⚠️ This deletes messages from the replied-to message onward. Reply to the starting message and run `.dltall confirm` to proceed.")
+                return
             if not event.is_reply:
-                await safe_edit(event, "❌ Reply to a message to delete all from there onwards.")
+                await safe_edit(event, "❌ Reply to a starting message, then run `.dltall confirm`.")
                 return
             try:
                 r = await event.get_reply_message()
@@ -19900,17 +20180,7 @@ async def run_user_bot(session_string, chat_id):
                     return
             try:
                 await cmd_data["func"](event, arg)
-                # ─── AUTO-DELETE COMMAND MESSAGE ITSELF ───
-                if user_bot.AUTO_DELETE_ENABLED:
-                    async def auto_del_cmd(ev=event):
-                        try:
-                            await asyncio.sleep(user_bot.AUTO_DELETE_DELAY)
-                            await ev.delete()
-                        except:
-                            pass
-                    task = asyncio.create_task(auto_del_cmd())
-                    user_bot.auto_delete_tasks.add(task)
-                    task.add_done_callback(user_bot.auto_delete_tasks.discard)
+                # Keep the user's command and all normal chat messages intact.
             except FloodWaitError as fw:
                 await asyncio.sleep(fw.seconds + 1)
             except Exception:

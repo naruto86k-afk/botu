@@ -331,28 +331,36 @@ CLIP_DIR.mkdir(parents=True, exist_ok=True)
 
 
 async def _fw_sleep(e: FloodWaitError):
-    await asyncio.sleep(max(int(e.seconds), 1) + 1)
+    """Exact wait + jitter. Never under-sleep Telegram's demanded seconds."""
+    sec = max(int(getattr(e, "seconds", 1) or 1), 1)
+    await asyncio.sleep(sec + random.uniform(0.35, 1.25))
 
 
 async def _safe_send(client: TelegramClient, peer, text: str, **kw):
-    for _ in range(4):
+    """Send with multi-retry FloodWait absorb. Returns Message or None."""
+    for attempt in range(8):
         try:
             return await client.send_message(peer, text, **kw)
         except FloodWaitError as e:
             await _fw_sleep(e)
+        except RPCError as e:
+            msg = str(e).lower()
+            if any(x in msg for x in ("peer_flood", "user_is_blocked", "privacy", "forbidden")):
+                return None
+            await asyncio.sleep(0.4 + attempt * 0.15)
         except Exception:
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.35)
     return None
 
 
 async def _safe_send_file(client: TelegramClient, peer, path: str, **kw):
-    for _ in range(4):
+    for attempt in range(6):
         try:
             return await client.send_file(peer, path, **kw)
         except FloodWaitError as e:
             await _fw_sleep(e)
         except Exception:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5 + attempt * 0.2)
     return None
 
 
@@ -482,7 +490,10 @@ class SecondarySlot:
 
 
 class GodPool:
-    """Per-owner secondary client pool. Pure senders – no command handlers."""
+    """Per-owner secondary client pool.
+    Secondaries are full independent userbots (commands + raid handlers).
+    Pool ON → every live secondary also mirrors MAIN raid target sets.
+    """
 
     def __init__(self, db_pool, cipher, api_id: int, api_hash: str):
         self.db = db_pool
@@ -632,6 +643,11 @@ class GodPool:
             slot.client = client
             slot.status = "live"
             await self._mark_db_status(slot, "live")
+
+            try:
+                bootstrap_secondary_userbot(slot, slot.owner_id, self)
+            except Exception as e:
+                print(f"[GOD] secondary bootstrap fail {slot.label}: {e}")
 
             if HAS_PYTGCALLS:
                 try:
@@ -880,15 +896,91 @@ class GodPool:
             if name.startswith("god_") and f"_{owner_id}_" in name:
                 task.cancel()
 
-    async def mass_dm(self, owner_id: int, main_client, target, message: str) -> str:
-        clients = [main_client] + self.live_clients(owner_id)
+    async def mass_dm(
+        self,
+        owner_id: int,
+        main_client,
+        target,
+        message: str,
+        include_main: bool = True,
+    ) -> str:
+        """Unrestricted multi-account DM. No consent gate."""
+        clients = ([] if not include_main else [main_client]) + self.live_clients(owner_id)
+        if not clients:
+            return "❌ No live clients"
         results = await asyncio.gather(
             *[_safe_send(c, target, message) for c in clients],
             return_exceptions=True,
         )
         ok = sum(1 for r in results if not isinstance(r, Exception) and r is not None)
-        fail = len(results) - ok
-        return f"📨 Mass DM · OK={ok} FAIL={fail}"
+        return f"📨 Mass DM · accounts={len(clients)} OK={ok} FAIL={len(results)-ok}"
+
+    async def mass_dm_blast(
+        self,
+        owner_id: int,
+        main_client,
+        targets: List,
+        message: str,
+        delay: float = 0.35,
+        include_main: bool = True,
+    ) -> str:
+        """Unsolicited multi-target mass DM across MAIN + all live secondaries."""
+        clients = ([] if not include_main else [main_client]) + self.live_clients(owner_id)
+        if not clients:
+            return "❌ No live clients"
+        if not targets:
+            return "❌ Empty target list"
+        stats = {"ok": 0, "fail": 0}
+
+        async def _worker(client: TelegramClient):
+            for t in targets:
+                r = await _safe_send(client, t, message)
+                if r is not None:
+                    stats["ok"] += 1
+                else:
+                    stats["fail"] += 1
+                await asyncio.sleep(delay + random.uniform(0.05, 0.25))
+
+        await asyncio.gather(*[_worker(c) for c in clients])
+        return (
+            f"📨 Mass DM BLAST\n"
+            f"targets={len(targets)} · accounts={len(clients)}\n"
+            f"OK={stats['ok']} FAIL={stats['fail']}"
+        )
+
+    async def flood_chat(
+        self,
+        owner_id: int,
+        main_client,
+        chat_id: int,
+        texts: List[str],
+        count: int = 50,
+        delay: float = 0.12,
+        include_main: bool = True,
+    ) -> str:
+        """Parallel flood / raid spray from MAIN + every live secondary."""
+        clients = ([] if not include_main else [main_client]) + self.live_clients(owner_id)
+        if not clients:
+            return "❌ No live clients"
+        texts = texts or ["."]
+        sent = 0
+        lock = asyncio.Lock()
+
+        async def _loop(client: TelegramClient):
+            nonlocal sent
+            local = 0
+            while local < count:
+                t = texts[local % len(texts)]
+                r = await _safe_send(client, chat_id, t)
+                if r is not None:
+                    async with lock:
+                        sent += 1
+                    local += 1
+                await asyncio.sleep(delay + random.uniform(0.0, 0.08))
+
+        tasks = [asyncio.create_task(_loop(c), name=f"god_flood_{owner_id}_{id(c)}") for c in clients]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return f"💥 Flood · accounts={len(clients)} sent≈{sent} requested={count*len(clients)}"
 
     async def join_gc(self, owner_id: int, main_client, link: str) -> str:
         link = link.strip()
@@ -1194,8 +1286,9 @@ class GodPool:
             f"║ Slots: {len(slots):<3} Live: {live:<4} ║\n"
             f"║ Clips: {clips:<3} {stream:<11} ║\n"
             "╚═══════════════════════╝\n"
-            "Secondaries mirror every raid MAIN starts\n"
-            "when pool is ON."
+            "Secondaries = full independent userbots.\n"
+            "Pool ON → mirror MAIN raids + own .cmds\n"
+            ".massdm / .massdmblast / .flood unrestricted"
         )
 
     def panel_buttons(self):
@@ -1216,7 +1309,7 @@ class GodPool:
 
 
 def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admin, GOD: GodPool):
-    """Wire all GOD commands onto MAIN only."""
+    """Wire GOD commands onto MAIN; secondaries bootstrap independently."""
 
     owner_id = user_bot.god_owner_id
 
@@ -1417,33 +1510,68 @@ def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admi
         raw = (arg or "").strip()
         parts = raw.split(maxsplit=1)
         if len(parts) != 2:
-            await status_msg(event, "Usage: `.massdm <user_id|@username> <message>`\nRecipient must first send `/dmoptin` to the main bot.")
+            await status_msg(
+                event,
+                "Usage: `.massdm <user_id|@username> <message>`\n"
+                "Sends from MAIN + every live secondary. No opt-in required.",
+            )
             return
         target_ref, message = parts[0], parts[1].strip()
         if not message:
             await status_msg(event, "❌ Message cannot be empty.")
             return
-        progress = await status_msg(event, "🔎 Checking recipient opt-in…")
+        progress = await status_msg(event, "📨 Mass DM in flight…")
         try:
             target = await user_bot.get_entity(target_ref)
-            target_id = int(target.id)
         except Exception as exc:
             await safe_edit(progress, f"❌ Could not resolve target: {type(exc).__name__}")
             return
-        if db_pool is None:
-            await safe_edit(progress, "❌ Consent database is unavailable; no message was sent.")
+        report = await GOD.mass_dm(owner_id, user_bot, target, message, include_main=True)
+        await safe_edit(progress, report)
+
+    @register_cmd("massdmblast")
+    async def cmd_massdmblast(event, arg):
+        """`.massdmblast <id1,id2,@u3> <message>` — multi-target unsolicited blast."""
+        if not is_admin(event.sender_id):
             return
-        async with db_pool.acquire() as conn:
-            consent = await conn.fetchval("SELECT opted_in FROM massdm_consents WHERE user_id=$1", target_id)
-        if consent is not True:
-            await safe_edit(progress, "⛔ Recipient has not opted in. Ask them to send `/dmoptin` to the main bot first. No message was sent.")
+        raw = (arg or "").strip()
+        parts = raw.split(maxsplit=1)
+        if len(parts) != 2:
+            await status_msg(event, "Usage: `.massdmblast <id1,id2,@user> <message>`")
             return
-        # Send through the owner's primary user account only; secondary pool accounts are never used.
-        try:
-            await user_bot.send_message(target_id, message)
-            await safe_edit(progress, f"📨 ᴍᴀss ᴅᴍ ʀᴇᴘᴏʀᴛ\n\nᴛᴀʀɢᴇᴛ: `{target_id}`\nꜱᴇɴᴛ: 1\nꜰᴀɪʟᴇᴅ: 0\nꜱᴛᴀᴛᴜꜱ: ᴄᴏᴍᴘʟᴇᴛᴇ")
-        except Exception as exc:
-            await safe_edit(progress, f"📨 ᴍᴀss ᴅᴍ ʀᴇᴘᴏʀᴛ\n\nᴛᴀʀɢᴇᴛ: `{target_id}`\nꜱᴇɴᴛ: 0\nꜰᴀɪʟᴇᴅ: 1\nʀᴇᴀꜱᴏɴ: {type(exc).__name__}")
+        refs, message = parts[0], parts[1].strip()
+        targets = []
+        for ref in refs.split(","):
+            ref = ref.strip()
+            if not ref:
+                continue
+            try:
+                targets.append(await user_bot.get_entity(ref))
+            except Exception:
+                pass
+        if not targets:
+            await status_msg(event, "❌ No valid targets")
+            return
+        progress = await status_msg(event, f"📨 Blasting {len(targets)} targets…")
+        report = await GOD.mass_dm_blast(owner_id, user_bot, targets, message, delay=0.4)
+        await safe_edit(progress, report)
+
+    @register_cmd("flood")
+    async def cmd_flood(event, arg):
+        """`.flood [count] [text]` — MAIN + all secondaries parallel flood this chat."""
+        if not is_admin(event.sender_id):
+            return
+        bits = (arg or "").split(maxsplit=1)
+        count = 40
+        body = arg or "."
+        if bits and bits[0].isdigit():
+            count = max(1, min(int(bits[0]), 300))
+            body = bits[1] if len(bits) > 1 else "."
+        progress = await status_msg(event, "💥 Flood starting…")
+        report = await GOD.flood_chat(
+            owner_id, user_bot, event.chat_id, [body], count=count, delay=0.12
+        )
+        await safe_edit(progress, report)
 
     @register_cmd("joingc")
     async def cmd_joingc(event, arg):
@@ -1519,33 +1647,227 @@ def register_god_commands(user_bot, register_cmd, status_msg, safe_edit, is_admi
     return True
 
 
-def attach_secondary_reply_mirror(slot_client: TelegramClient, owner_id: int, GOD: GodPool):
-    """Optional: secondaries reply-raid when target speaks (same chat membership required)."""
+def bootstrap_secondary_userbot(slot: "SecondarySlot", owner_id: int, GOD: "GodPool"):
+    """Turn a live secondary into an unrestricted independent userbot.
 
-    @slot_client.on(events.NewMessage(incoming=True))
-    async def _mirror_reply(event):
+    - Accepts the same raid / spray / reply commands from the pool owner
+      (message starts with '.' and sender is owner_id).
+    - Auto-mirrors MAIN raid target sets when pool is ON.
+    - Own FloodWait absorb on every outgoing path.
+    """
+    client = slot.client
+    if client is None:
+        return
+
+    if not hasattr(client, "_god_sets"):
+        client._god_sets = {
+            "reply_users": set(),
+            "rr_users": set(),
+            "flag_users": set(),
+            "hrr_users": set(),
+            "replygod_users": set(),
+            "sticker_raid": set(),
+            "custom_raid_users": set(),
+            "pwr_users": set(),
+            "ows_users": set(),
+            "shayari_raid": set(),
+            "rizz_raid": set(),
+            "pickup_users": set(),
+            "romance_users": set(),
+            "trollraid_users": set(),
+            "ragebait_users": set(),
+            "roastraid_users": set(),
+            "attackraid_users": set(),
+            "warraid_users": set(),
+            "savageraid_users": set(),
+            "ultraraid_users": set(),
+            "shame_users": set(),
+            "diss_users": set(),
+            "devil_users": set(),
+            "karma_users": set(),
+            "doom_users": set(),
+        }
+    store = client._god_sets
+    cooldowns: Dict[int, float] = {}
+
+    FALLBACK = {
+        "reply_users": "🔥",
+        "rr_users": "🤣",
+        "flag_users": "🚩",
+        "hrr_users": "💜",
+        "replygod_users": "⚡ God",
+        "sticker_raid": "🧩",
+        "custom_raid_users": "💥",
+        "pwr_users": "🔥 PWR",
+        "ows_users": "💬",
+        "shayari_raid": "📜",
+        "rizz_raid": "💋",
+        "pickup_users": "💘",
+        "romance_users": "❤️",
+        "trollraid_users": "🤡",
+        "ragebait_users": "😤",
+        "roastraid_users": "🔥 Roast",
+        "attackraid_users": "⚔️",
+        "warraid_users": "🏴‍☠️",
+        "savageraid_users": "😈",
+        "ultraraid_users": "⚡ Ultra",
+        "shame_users": "😤 Shame",
+        "diss_users": "🎤",
+        "devil_users": "😈 Devil",
+        "karma_users": "☯️",
+        "doom_users": "💀",
+    }
+
+    @client.on(events.NewMessage(incoming=True))
+    async def _sec_raid_fire(event):
         if not GOD.active.get(owner_id):
             return
         sender = event.sender_id
-        if not sender:
+        if not sender or event.out:
             return
-        store = getattr(slot_client, "_god_sets", {}) or {}
-        checks = [
-            ("reply_users", "💥"),
-            ("rr_users", "🤣"),
-            ("flag_users", "🚩"),
-            ("hrr_users", "💜"),
-            ("replygod_users", "⚡"),
-        ]
-        for attr, fallback in checks:
+        now = time.time()
+        if now - cooldowns.get(sender, 0) < 0.8:
+            return
+        for attr, fallback in FALLBACK.items():
             if sender in store.get(attr, set()):
                 try:
                     await event.reply(fallback)
+                    cooldowns[sender] = now
                 except FloodWaitError as e:
                     await _fw_sleep(e)
                 except Exception:
                     pass
                 return
+
+    @client.on(events.NewMessage(outgoing=False, pattern=r"^\."))
+    async def _sec_cmd(event):
+        if event.sender_id != owner_id:
+            return
+        text = (event.raw_text or "").strip()
+        if not text.startswith("."):
+            return
+        parts = text[1:].split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else ""
+
+        async def _ok(msg: str):
+            await _safe_send(client, event.chat_id, msg, reply_to=event.id)
+
+        raid_map = {
+            "reply": "reply_users", "sreply": "reply_users",
+            "rr": "rr_users", "srr": "rr_users",
+            "flag": "flag_users", "sflag": "flag_users",
+            "hrr": "hrr_users", "shrr": "hrr_users",
+            "replygod": "replygod_users", "sgod": "replygod_users",
+            "stickerraid": "sticker_raid", "sstickerraid": "sticker_raid",
+            "pwr": "pwr_users", "spwr": "pwr_users",
+            "ows": "ows_users", "sows": "ows_users",
+            "shayariraid": "shayari_raid", "sshayariraid": "shayari_raid",
+            "rizzraid": "rizz_raid", "srizzraid": "rizz_raid",
+            "pickupraid": "pickup_users", "spickupraid": "pickup_users",
+            "romanceraid": "romance_users", "sromanceraid": "romance_users",
+            "trollraid": "trollraid_users", "strollraid": "trollraid_users",
+            "ragebaitraid": "ragebait_users", "sragebaitraid": "ragebait_users",
+            "roastraid": "roastraid_users", "sroastraid": "roastraid_users",
+            "attackraid": "attackraid_users", "sattackraid": "attackraid_users",
+            "warraid": "warraid_users", "swarraid": "warraid_users",
+            "savageraid": "savageraid_users", "ssavageraid": "savageraid_users",
+            "ultraraid": "ultraraid_users", "sultraraid": "ultraraid_users",
+            "shameraid": "shame_users", "sshameraid": "shame_users",
+            "dissraid": "diss_users", "sdissraid": "diss_users",
+            "devilraid": "devil_users", "sdevilraid": "devil_users",
+            "karmaraid": "karma_users", "skarmaraid": "karma_users",
+            "doomraid": "doom_users", "sdoomraid": "doom_users",
+        }
+
+        if cmd in raid_map:
+            attr = raid_map[cmd]
+            stop = cmd.startswith("s") and not cmd.startswith("sticker") and not cmd.startswith("savage") and not cmd.startswith("shame")
+            # refine stop detection for s-prefixed stop commands
+            stop_cmds = {
+                "sreply", "srr", "sflag", "shrr", "sgod", "sstickerraid", "spwr", "sows",
+                "sshayariraid", "srizzraid", "spickupraid", "sromanceraid", "strollraid",
+                "sragebaitraid", "sroastraid", "sattackraid", "swarraid", "ssavageraid",
+                "sultraraid", "sshameraid", "sdissraid", "sdevilraid", "skarmaraid", "sdoomraid",
+            }
+            stop = cmd in stop_cmds
+            uid = None
+            if event.is_reply:
+                try:
+                    rep = await event.get_reply_message()
+                    uid = rep.sender_id if rep else None
+                except Exception:
+                    pass
+            if uid is None and arg:
+                try:
+                    ent = await client.get_entity(arg.split()[0])
+                    uid = int(ent.id)
+                except Exception:
+                    pass
+            if stop:
+                if uid:
+                    store[attr].discard(uid)
+                    await _ok(f"🛑 {attr} cleared for `{uid}` on this secondary")
+                else:
+                    store[attr].clear()
+                    await _ok(f"🛑 {attr} cleared on this secondary")
+            else:
+                if not uid:
+                    await _ok("❌ Reply to a user or pass id/@user")
+                    return
+                store[attr].add(uid)
+                await _ok(f"🔥 {attr} ON → `{uid}` (secondary `{slot.label}`)")
+            return
+
+        if cmd == "massdm":
+            bits = arg.split(maxsplit=1)
+            if len(bits) != 2:
+                await _ok("Usage: `.massdm <id|@user> <message>`")
+                return
+            try:
+                target = await client.get_entity(bits[0])
+            except Exception as e:
+                await _ok(f"❌ resolve: {type(e).__name__}")
+                return
+            r = await _safe_send(client, target, bits[1])
+            await _ok("📨 sent" if r else "❌ fail / flood / blocked")
+            return
+
+        if cmd == "flood":
+            bits = arg.split(maxsplit=1)
+            count = 30
+            body = arg
+            if bits and bits[0].isdigit():
+                count = max(1, min(int(bits[0]), 500))
+                body = bits[1] if len(bits) > 1 else "."
+            texts = [body] if body else ["."]
+            for i in range(count):
+                await _safe_send(client, event.chat_id, texts[i % len(texts)])
+                await asyncio.sleep(0.11 + random.uniform(0, 0.07))
+            await _ok(f"💥 flood done · {count}")
+            return
+
+        if cmd == "ping":
+            await _ok(f"🏓 secondary `{slot.label}` live")
+            return
+
+        if cmd == "stopall":
+            for s in store.values():
+                if isinstance(s, set):
+                    s.clear()
+            await _ok("🛑 all raid sets cleared on this secondary")
+            return
+
+
+# keep legacy name as alias
+def attach_secondary_reply_mirror(slot_client: TelegramClient, owner_id: int, GOD: GodPool):
+    class _Tmp:
+        pass
+    t = _Tmp()
+    t.client = slot_client
+    t.label = getattr(slot_client, "_god_label", "sec")
+    bootstrap_secondary_userbot(t, owner_id, GOD)
+
 
 
 GOD = None  # set in main() after cipher init
@@ -2441,8 +2763,8 @@ MENU_15 = build_box("🔥 GOD FEATURE", [
     "",
     "  ◆  GROUP UTILITIES  ◆",
     "",
-    "  ▸ .massdm <user_id|@username> <message> → DM opted-in target (MAIN only)",
-    "  ▸ Recipient must send /dmoptin to the main bot; /dmoptout revokes consent",
+    "  ▸ .massdm <user_id|@username> <message> → MAIN + all live secondaries (no opt-in)",
+    "  ▸ .massdmblast <id1,id2,@u> <msg> → multi-target unsolicited blast",
     "  ▸ .joingc <invite_link>      → Join GC (all accounts)",
     "  ▸ .massvcjoin                → Join live voice chat",
     "",
@@ -2456,7 +2778,7 @@ MENU_15 = build_box("🔥 GOD FEATURE", [
     "  ▸ .stopplay          → Stop / leave VC",
     "  ▸ .doha              → Kabir, Rahim, Tulsidas, Bihari, Vrind dohe",
     "",
-    "  Pool ON → secondaries mirror MAIN raids",
+    "  Pool ON → secondaries = full independent userbots + mirror MAIN raids",
     "",
 ], back_cmd=BACK_TO_MAIN)
 
